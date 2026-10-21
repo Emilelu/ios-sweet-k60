@@ -15,6 +15,9 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      cache_gen:
+        description: bump to invalidate the dxb build cache
+        default: "v1"
   push:
     branches: [main]
     paths:
@@ -41,7 +44,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Restore dxb build cache
+        id: bcache
+        uses: actions/cache/restore@v4
+        with:
+          path: dxb
+          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v1' }}
+
       - name: Fetch build script
+        if: steps.bcache.outputs.cache-hit != 'true'
         run: |
           git init -q dxb
           git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
@@ -52,6 +63,24 @@ jobs:
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
           ls dxb/patches
+
+      - name: Normalise cached tree
+        run: |
+          # The upstream script skips a patch whose `git apply --check` fails, so a
+          # cached, already-patched tree would silently keep stale patches. Reset the
+          # xnu work tree first: only files we patch get new mtimes, so make then
+          # rebuilds just those (that is where the speed-up comes from).
+          if [ -d dxb/xnu/.git ]; then
+            git -C dxb/xnu checkout -- . || true
+            git -C dxb/xnu clean -fdq || true
+          fi
+          rm -rf dxb/patches
+          mkdir -p dxb/patches
+          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/ 2>/dev/null || true
+          ls dxb/patches | head -50
+          # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh || true
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh || true
 
       - name: Deps
         run: |
@@ -115,6 +144,13 @@ jobs:
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+
+      - name: Save dxb build cache
+        if: always() && steps.bcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: dxb
+          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v1' }}
 
       - uses: actions/upload-artifact@v4
         if: always()
