@@ -187,3 +187,50 @@
 - 本地产物：`artifacts/kernel.development.sweet`、`artifacts/kernel.zip`、另可下载 `xnu-buildtree`（23 MB，含生成头文件，供单文件编译复用）
 - 结论：**不需要 Mac 虚拟机**，秒级触发的 9 分钟 CI 就是最快的迭代方式
 - 缓存优化版工作流已推到分支 `cache-ci`（未合并）：加了 `actions/cache` + 每次重置补丁树，可把重复构建压到分钟级；但 9 分钟已经够快，暂不动主线
+
+## 十三、暂停点（2026-10-21 晚，明天继续）
+
+### 显示驱动进度：stage 0 ✅ / stage 1 ✅
+
+| stage | 内容 | 结果 |
+|---|---|---|
+| 0 | 读 `disp_cc + 0x9000`（mdss_gdsc）的 GDSCR | ✅ 读通，**PWR_ON=0**（ABL 交接后 MDSS 电源域是关的） |
+| 1 | 清 `SW_COLLAPSE` + 设 EN/CLK_DIS wait，再轮询 `PWR_ON` | ✅ **PWR_ON=1**，域被我们自己点亮 |
+| 2 | 使能 disp_cc 时钟分支（`mdss_mdp_clk` @0x800c、`byte0_clk` @0x8028、`byte0_intf` @0x802c）并查 halt 位 | ⏭ 下一步 |
+| 3 | 读 MDSS `HW_VERSION`（`0xae00000+0x0`）确认可访问 | ⏭ 依赖 stage 2 |
+| 4 | DSI PHY PLL（1.2GHz）锁定 | ⏭ |
+| 5 | 面板初始化（`panel-m11a.dts` 的 on-command，60Hz 用 timing@0） | ⏭ |
+| 6 | 首帧（DSI command mode 直推；DSC 8bpp 方案待定） | ⏭ |
+
+**验收方式**：二进制信道 —— shim 里 `IMEM_RESTART_REASON = 成功?0:RESTART_BOOTLOADER`，
+复位后落 Android 还是 fastboot 一目了然；shim 源码里 `K60_DISP0` / `K60_DISP1` 两个宏就是这两步。
+
+### 明天开工命令（照抄即可）
+
+```bash
+cd ~/hackios/ios-sweet/shim
+CFLAGS_EXTRA="-DK60_DISP2 -DK60_NOFB" ./build.sh          # 写好后编译 stage 2
+cd ~/hackios && ./run-fast.sh ios-sweet/shim/out/shim-boot.img 1
+# 设备侧辅助
+adb -s ffec9d48 reboot bootloader && timeout 10 fastboot devices
+```
+
+### 设备当前状态
+
+- 已回到 Android（`ffec9d48`，adb 正常），未改任何分区，`boot_a` 备份完好
+  （`~/hackios/dump/boot_a.img`，md5 `9d20ec5ed698263d1a8ff35efebcf795`）
+- `opcust` 分区里被我们写过探测数据（块 0、16），该分区未挂载、无价值，无需清理
+- 累积的 shim 变体镜像：`~/hackios/{w,r,disp0,disp1}.img`
+
+### CI 侧
+
+- 仓库 https://github.com/XTOM0706/ios-sweet-k60 （main = `e2c29b5`）
+- 首次 run 9 分钟成功，产物 `artifacts/kernel.development.sweet`（17MB，arm64 Mach-O）
+- 刚推的缓存版工作流已触发 run `39619638414`（在跑/或已完成，`~/hackios/ci.log` 记录）
+- token 在 `~/.config/gh-token`（600），随时可撤
+
+### 待决策（明天）
+
+1. 继续 stage 2→6 的显示驱动（这是能看到 iOS 的唯一路径，周期最长）
+2. 还是先做 `mkadt.py` 的 cape 版 + 把 sweet kernel 塞进 shim 试着起（盲跑，只能靠二进制/时序判读）
+3. 顺带修复项：UFS 写不落地（XNU 要 `ufsrw=1` 可写根时会是问题）
