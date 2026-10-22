@@ -1048,3 +1048,30 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
    `PLL_LOCK_OVERRIDE`(0x80) → `PLL_LOCK_DELAY` → `PLL_CNTRL` 使能
 2. 输入参数：DTS 的 `phy-timings = [00 27 0a 0a 1b 25 0a 0b 0b 0a 02 04 20 0f]` + `panel-clockrate=1.2GHz`
 3. 验收：读 PLL lock（`PLL_CNTRL`/状态位）——用时长信道
+
+## 四十四、2026-10-22：DSI PLL 仍在运行（第 29 轮，省掉最难的一级）
+
+判定依据（上游 `dsi_phy_7nm.c` 的 `dsi_phy_hw_v4_0_pll_is_locked`）：
+`CMN_PLL_CNTRL(0xae94400+0x3c)` 的 **bit0**。
+
+**实测：bit0 = 1 → DSI0 PLL 仍在运行/锁定。**
+
+**意义（重大）**
+- ABL 画 boot logo 时点亮的 **PLL 没有被关掉**，仍然锁着
+- 这一级本来是显示链里最难的（30+ 次寄存器写、噪声/锁定参数），现在**可能整级省掉**
+- 说明 ABL 只关了"面板显示输出/DPU"，PHY 层的模拟部分还活着
+
+**下一步（顺序可能大幅缩短）**
+1. 读 DSI 控制器（`0xae94000`）状态：ABL 是否也留下了 command-mode 的 DMA/控制器配置
+   - 参考 `drivers/gpu/drm/msm/dsi/dsi_host.c` / `dsi_7nm.xml`
+2. 若控制器可用：发一条 DCS 短包 `0x29`（Display On）或 `0x11`+`0x29`（Sleep Out + Display On）
+   —— 面板可能只是被"进入睡眠"，唤醒即可
+3. 然后发 `0x51`（亮度）→ 推我们自己的帧（`0x2C` write_memory_start + 像素数据）
+4. 验收：屏幕出现**我们自己写的图案**（彩条 / XTOM）
+
+**显示链进度（重估）**
+```
+GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
+ → MDSS 可读 ✅ → DSI PHY 可访问 ✅ → **PLL 仍在跑 ✅（白捡）**
+  → DSI 控制器状态 ⏳ → 面板唤醒 ⏳ → 我们自己的首帧 ⏳
+```
