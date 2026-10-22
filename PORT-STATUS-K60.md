@@ -299,3 +299,17 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 - `v4-clear.img` 清 reason 回 Android；`v4-ufschain.img` 链路结果用停留时长编码
 - `q1..q4.img` 二元问答（Q1 takeover / Q2 GPT / Q3 写 / Q4 读回）
 - 信道工具：`./boot-once.sh <img>`（自动等交接、测返回时长）
+
+### 二元问答实测（v4，2026-10-22 早）
+
+| 问题 | 结果 |
+|---|---|
+| Q1 UFS 主机接管成功？ | ❌ FAIL |
+| Q5 disp_cc 时钟块寄存器可读（非零）？ | ❌ FAIL（读到 0/0xffffffff） |
+| Q2/Q3/Q4/Q6 | 受限未完成（发送失败/未跑） |
+
+**Q5 的含义**：显示时钟控制器整块不可访问（需要 VDD_MM/VDD_MXA 供电轨 + GCC iface 时钟），
+所以「自己点亮屏幕」必须先做 RPMh 供电 + GCC 时钟，再谈 disp_cc/DSI。
+
+**Q1 的含义**：UFS 控制器不能沿用 ABL 的现场，需要自己跑 UFSHCI 初始化
+（HCE、UIC DME_LINKSTARTUP、UTRL/UTRD 队列）——这是拿到任何日志的前置条件。
