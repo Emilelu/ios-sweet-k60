@@ -399,3 +399,32 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 3. `VER` 若 >= 0x400（UFSHCI 4.0），legacy 的 0x50 队列寄存器可能被重映射/需要 legacy 使能位
 4. 参考其它 fork（`ios-raphael`/`ios-apollo`/`ipados-nabu`）的 shim 与 XNU UFS 补丁：
    SM8250/SM8150 与 cape 同代，它们的队列初始化序列可直接对照
+
+## 二十一、2026-10-22：A/B 两条路收敛到同一个前置（电源+时钟）
+
+**探针结果（全部经 `ask.sh` 的 hand-off 校验，可信）**
+
+| 探针 | 结果 | 含义 |
+|---|---|---|
+| Q40 CAP 可读（HCE 之后） | ❌ | CAP 读到 0 |
+| Q42 VER >= 0x300 | ❌ | 同上 |
+| Q43 `HCS` 非零（寄存器块活着？） | ❌ | **UFS 寄存器块整体读不到** |
+| Q44 HCE 已由 ABL 置位 | ❌ | 一致：控制器没上电就没法有状态 |
+| Q46 GCC GDSCR 可读 | ❌ | GCC 侧 GDSCR 也读不到 |
+| Q1 全链路 | ❌ | 自然失败 |
+
+**结论（重要）**：ABL 交接后，**UFS 控制器和显示时钟块都是断电/断时钟的**，
+寄存器读到 0。之前"UFS 链路能起来"的判断是在寄存器不可读的情况下由
+`wait_set()` 的边界行为造成的误判——需要作废。
+
+**因此 A（日志）和 B（显示）收敛为同一个前置工作**：
+1. **GCC 时钟**：`gcc_ufs_phy_*`、`gcc_disp_*`、以及各 GDSC（GCC 通常常开，需先确认基址与可读性）
+2. **RPMh 供电**：`vdd_ufs`、`vdd_mm`、`vdd_mxa`（PMIC 侧，经 AOSS/RSC）
+3. 之后才是 UFSHCI 初始化 / disp_cc+GDSC+DSI
+
+**下一步（下次开工）**
+1. 先确认 GCC 基址与可读性：设备树 `clock-controller@100000` 的 reg、以及一个确定非零的 GCC 寄存器
+   （例如 `gcc_ufs_phy_axi_clk` 的 halt 寄存器），把 Q46 的失败原因分清是"地址错"还是"被门控"
+2. 读 `ufs_phy_gdsc`（GCC 0x87004）的 GDSCR 原始位，判断域状态与是否可软开
+3. 用 GCC 使能 UFS 的 AXI/AHB/ICE 时钟 → 再试 UFSHCI 初始化（Q43 变 PASS 即成功）
+4. 显示方向同理：GCC 的 disp 相关时钟 + RPMh 的 vdd_mm/vdd_mxa
