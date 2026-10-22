@@ -517,3 +517,36 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 （Android 真实时钟树与供电清单）以及 `ufs.c` 里 `gcc_ufs_bring_up()` 的寄存器偏移表
 （gdsc 0x87004、ahb 0x87020、axi 0x87018、ice 0x8706c、unipro 0x87064、phy_aux 0x870a4、
 tx/rx symbol 0x87024/0x87028/0x870c0、clkref 0x9c000）——这些不依赖信道，可直接用。
+
+## 二十五、2026-10-22：信道重新定性（重要）
+
+### 发现 1：`misc` 里有残留的 `bootonce-bootloader`
+`adb reboot bootloader` 会在 `misc` 的第 0 字段写 `bootonce-bootloader`。
+它和 IMEM 的 restart_reason 抢优先级，是之前 PASS/FAIL 混乱的一个来源。
+已备份前 4KB（`dump/misc_head_backup.bin`）并清空该 32 字节命令字段。
+
+### 发现 2：`fastboot boot` 之后，shim 复位会回到 **fastboot**
+用 60 秒停留镜像（`-DK60_SLEEP`，delay 已加 19.2MHz 回退）实测：
+`fastboot boot` → 设备离开 fastboot → **约 60 秒后重新出现在 fastboot**。
+这同时证明了两件事：
+1. **shim 确实执行了 60 秒**（delay/停留机制可用）
+2. **快迭代通道成立**：一轮 = 停留时长 + ABL 回 fastboot（~5 s），不需要等 Android
+
+因此「时长信道」是当前最可信的判据，判读方式：
+`./holdtime.sh <img>`（等 hand-off → 计时 → fastboot 重现），
+基线为 0 秒停留镜像的返回值，差值即停留秒数。
+
+### 发现 3：`fastboot boot` 偶发 BOOT_FAILED
+设备在 fastboot 里但 `fastboot boot` 返回失败（疑似上次会话残留状态）。
+规避：先 `fastboot reboot bootloader` 重置一次再发；`holdtime.sh` 需要加这一步重试。
+
+### 本轮结论
+- 之前基于 reason 的 PASS/FAIL 结论**不可全信**（PASS 可能来自 misc 残留命令或 reset→fastboot 的默认行为）
+- **可信判据**：`holdtime.sh` 测出的停留时长（≥10 s 差值才算数）
+- 已具备的能力：v4 镜像执行、60 秒级停留、复位回 fastboot（快迭代）
+
+### 下次开工
+1. 给 `holdtime.sh` 加重试（BOOT_FAILED → `fastboot reboot bootloader` 后再发，最多 3 次）
+2. 用时长信道重测三条地基：UFS 块是否可读（Q43）、GCC UFS 上电（Q61）、GICD 对照（Q62）
+   —— 每条都用「hold = 2s + 5s*code」编码，比二元信道信息量大且不依赖 reason
+3. 通过后再继续 UFSHCI 初始化 / disp_cc
