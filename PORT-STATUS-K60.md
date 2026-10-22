@@ -989,3 +989,29 @@ harness 重做，结果完全反转：
 GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc/MDSS 可访问 ✅
  → disp_cc 内部时钟 ⏳ → DSI PHY PLL ⏳ → 面板初始化 ⏳ → 首帧 ⏳
 ```
+
+## 四十二、2026-10-22：disp_cc 内部时钟全开，MDSS 活了（第 26 轮）
+
+新增 `disp_bring_up(&hw_version)`（`shim/ufs.c`）：
+1. `gcc_disp_hf_axi_clk`(0x3700c) / `sf_axi_clk`(0x37014)
+2. `disp_cc` GDSC（`0xaf09000`）清 SW_COLLAPSE
+3. `disp_cc` 内部时钟分支：AHB `0x80a4`、MDP `0x800c`、byte0 `0x8028`、byte0_intf `0x802c`
+4. 读 MDSS `HW_VERSION`（`0xae00000`）
+
+**全部通过：时钟都锁住，`HW_VERSION` 读到正常值（非 0、非 0xffffffff）。**
+
+同时加了**通用寄存器快照/回滚** `reg_note()` / `reg_restore_all()`（24 个槽），
+所有 MMIO 写都会在复位前还原，不再污染下一次 Android 启动。
+
+**显示链进度**
+```
+GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅ → MDSS 可读 + HW_VERSION ✅
+ → DSI PHY PLL ⏳ → 面板初始化 ⏳ → 首帧 ⏳
+```
+
+**下轮（DSI PHY PLL，这是显示链最硬的一级）**
+- DSI0 PHY 基址 `0xae94400`（`qcom,mdss_dsi_phy0`）
+- 输入：DTS 的 14 字节 `qcom,mdss-dsi-panel-phy-timings`
+  `[00 27 0a 0a 1b 25 0a 0b 0b 0a 02 04 20 0f]`，以及 `panel-clockrate = 1.2 GHz`
+- 参考实现：上游 `drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c`（SM8450 用的 5nm/4nm 版）
+- 验收：读 PHY 的 PLL lock 状态位（用时长信道）
