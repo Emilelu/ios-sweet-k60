@@ -12,7 +12,9 @@ OBJCOPY=$CROSS/llvm-objcopy
 READELF=$CROSS/llvm-readelf
 NM=$CROSS/llvm-nm
 DTB=${DTB:-../../dump/live.dtb}
-HDRVER=${HDRVER:-2}
+# The K60 (GKI-era) ABL silently ignores header v2 boot images: fastboot
+# reports "Booting OKAY" and then just boots the slot. v4 is required.
+HDRVER=${HDRVER:-4}
 
 # -fno-jump-tables: clang otherwise emits a table of absolute string pointers
 # for the panic switch, breaking the "no absolute relocations" invariant below.

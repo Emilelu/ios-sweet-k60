@@ -234,3 +234,68 @@ adb -s ffec9d48 reboot bootloader && timeout 10 fastboot devices
 1. 继续 stage 2→6 的显示驱动（这是能看到 iOS 的唯一路径，周期最长）
 2. 还是先做 `mkadt.py` 的 cape 版 + 把 sweet kernel 塞进 shim 试着起（盲跑，只能靠二进制/时序判读）
 3. 顺带修复项：UFS 写不落地（XNU 要 `ufsrw=1` 可写根时会是问题）
+
+## 十四、【关键修正】shim 从未执行 → 必须用 boot.img header v4（2026-10-22）
+
+**根因**：K60 是 GKI 时代设备，ABL 只接受 **boot.img header v4**。我们用上游 sweet 的
+`--header_version 2` 构建的镜像，ABL 收到后会 **静默忽略并回退启动 Android**，而
+`fastboot boot` 仍返回 `Sending OKAY / Booting OKAY`（那只是协议应答）。
+
+**证据链**：
+1. v2 + "停 60 秒"探针 → Android 仍在自己 ~41 秒的节奏回来（停留完全没发生）
+2. v2 + "关机探针"（`PSCI_SYSTEM_OFF`）→ 设备照常回到 Android（没执行）
+3. **v4 + 关机探针 → 设备离线 100 秒且再未回来 = 真的执行了关机** ✅
+
+**因此**：本次会话里之前所有基于 v2 镜像的"结果"（IMEM 信标、GDSCR `PWR_ON`、
+AHB 时钟被读通、UFS 读写探针…）**全部无效**，都是 Android 正常启动的噪音。
+真实状态需要全部用 v4 重测。
+
+**已改**：`shim/build.sh` 的 `HDRVER` 默认改为 **4**（v3/v4 下 `--dtb` 会被忽略，
+DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
+
+**下一步（v4 重测清单）**：
+1. 关机探针 → 已验证执行 ✅
+2. "停 60 秒"探针 → 验证 `delay_ms`/时序信道（注意：`CNTFRQ_EL0` 读到 0 的坑已加 19.2MHz 回退）
+3. UFS 写入 → **读回前在 Android 侧 `echo 3 > /proc/sys/vm/drop_caches`**（此前"写不落地"可能是块设备页缓存假象）
+4. 显示 stage 0/1/2 → 全部重测（disp_cc 读到 0 也可能是无效镜像导致的）
+
+## 十五、2026-10-22 早：v4 生效后的真实基线
+
+### 已经确认可用
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| `fastboot boot` + **header v4** | ✅ 执行 | v4 关机探针 → 设备离线 100 秒不回来 |
+| IMEM restart_reason | ✅ 生效 | shim 要求 fastboot 就停在 fastboot；写 0 就回 Android |
+| `delay_ms` | ✅ 生效 | clear 镜像 0.5 s 停留 + Android 21 s 返回 |
+| 两条信道 | ✅ | ①reason 二元（fastboot/Android，~15 s 一轮）②停留时长多比特 |
+
+### 已经确认不可用（需重做）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| header v2 镜像 | ❌ 静默忽略 | K60 ABL 只认 v4；v2 时 `fastboot boot` 仍报 OKAY，然后回退启动 Android |
+| UFS 主机接管 | ❌ FAIL | `ufs_take_over()`（HCE/HCS/UTRLRDY + UTRLBA 接管）不成立 → GPT 查不到、读不了、写不了 |
+| 因此 UFS 日志通道 | ❌ | 需要自己做 UFSHCI 初始化（HCE、link start、UIC 命令、任务队列），不能靠"继承 ABL 状态" |
+
+### 结论修正
+
+- 本次会话前半段所有基于 v2 镜像的实验结论**全部作废**（IMEM 信标、GDSCR 读到 0、
+  AHB 时钟读通、UFS 读写"不落地"、shim 执行证据…）
+- 显示相关的 stage 0/1/2 需要**用 v4 全部重测**后才能下结论
+- 教训：**"代码在跑"这件事必须用不可误读的信号证明**（关机探针是最便宜的一种）
+
+### 下一步优先级
+
+1. **UFSHCI 初始化**（唯一能拿到日志的路）：读 CAP/HCS/HCE 与 UIC 状态 → 自己使能 HCE、
+   发 DME_LINKSTARTUP、配置 UTRL/UTRD 队列 → 再做 SCSI READ/WRITE。
+   一旦通了，日志、iOS 根可写、后续所有调试都有了地基。
+2. 用 v4 重测显示链路（GDSCR/AHB/MDSS 可读性），确认能否自点 DSI。
+3. 再谈 XNU（kernel 已有，`artifacts/kernel.development.sweet`）。
+
+### 工具与镜像清单（v4）
+
+- 通用构建：`HDRVER=4 CFLAGS_EXTRA="-DK60_XXX -DK60_NOFB" ./build.sh`
+- `v4-clear.img` 清 reason 回 Android；`v4-ufschain.img` 链路结果用停留时长编码
+- `q1..q4.img` 二元问答（Q1 takeover / Q2 GPT / Q3 写 / Q4 读回）
+- 信道工具：`./boot-once.sh <img>`（自动等交接、测返回时长）
