@@ -838,3 +838,24 @@ UFS 设备配置这件事**需要用户明确同意**后再动。
 
 **结论**：RPMh 的实现路径已经完全清晰（有公开参考 + 寄存器表），剩下的只是"查资源 ID + 照流程写"。
 这是显示链唯一的前置门槛。
+
+## 三十六、2026-10-22：cmd_db 位置确认（第 20 轮）
+
+RPMh 的 regulator 资源表 **cmd_db 在保留内存里，shim 可直接读**：
+
+| 项 | 值 |
+|---|---|
+| DT 节点 | `aop_cmd_db_region@80860000`，`compatible = "qcom,cmd-db"`，`no-map` |
+| 物理地址 | **`0x80860000`，长度 `0x20000`（128 KB）** |
+| Android 侧 | 无 `/dev/mem`，debugfs 也没有导出 → **用户态读不到** |
+| shim 侧 | MMU 关、物理寻址 → **可以直接读**（这是我们的优势） |
+
+**下轮实现（cmdc_db 解析 + ID 查询）**
+1. 在 shim 里读 `0x80860000`，校验 cmd_db 头（magic/version）
+2. 遍历 entry：按名字匹配 `vdd_mm` / `vdd_mxa`（也可顺带 `vdd_cx`、`vdd_mx`）
+3. 取出该资源的 **slave id / addr** 编码，拼成 RPMh 的 `CMD_ADDR`
+4. 结果用时长信道报告（找到 / 找不到 / 地址低几位）
+
+**这样就不需要逆向或外部资料**：资源 ID 从设备自己的 cmd_db 里读，和 Android 内核拿到的是同一份。
+
+**之后**：RSC TCS 写入（v2.7/v3.0 偏移已备好）→ 拉 `vdd_mm` → 验证 → GCC disp 时钟 → disp_cc → DSI
