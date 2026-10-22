@@ -371,3 +371,31 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 3. 若确认「镜像在 4 GiB 以上」→ 需要把 UFS 描述符放到低地址（例如用
    `cont_splash_region 0xb8000000` 这块 45 MiB 保留区当 DMA 缓冲，它肯定在 4 GiB 以下）
 4. 通了之后：SCSI READ → GPT → 日志通道；再回头做 B（显示供电链）
+
+## 二十、2026-10-22：低地址 DMA 重试 + 探针修正
+
+**工具修正**：新增 `ask.sh`（带 hand-off 校验：发送 OK → 设备必须先从 fastboot 消失 →
+再判 PASS/FAIL/UNKNOWN）。旧 `ask()` 的判定不可信，已弃用。
+
+**改动**：把 UFS 全部 DMA 缓冲搬到 `cont_splash_region 0xb8000000`
+（UTRL@+0x0、UCD@+0x1000、bounce@+0x2000、GPT entries@+0x4000），
+用宏保持原代码写法不变。这正是 Qualcomm 平台"低地址 DMA"的标准做法。
+
+**实测（可信判定）**：
+
+| 探针 | 结果 |
+|---|---|
+| Q1d 全链路（初始化+GPT 查 opcust） | ❌ FAIL |
+| `stage<=5`（链路 DP 为止） | ❌ FAIL |
+| `stage<=6`（队列 run 位） | ❌ FAIL |
+
+→ 仍是 **stage 7：`UTRLBA` 写后读回不等于我们的地址**，低地址**没有解决**。
+
+**下一步的四个候选（按可能性排序）**
+
+1. **`CAP` 读数可能不可信**：Q31 的 `CAP.64AS=0` 是在**未做 HCE/链路**时读的；
+   应在 `ufs_host_init()` 之后再读 CAP/VER（加探针 Q40/Q41）
+2. 我加的 `ufs_wr(REG_UTRLCLR, 0xffffffff)` 可能惹事 → 删掉重试
+3. `VER` 若 >= 0x400（UFSHCI 4.0），legacy 的 0x50 队列寄存器可能被重映射/需要 legacy 使能位
+4. 参考其它 fork（`ios-raphael`/`ios-apollo`/`ipados-nabu`）的 shim 与 XNU UFS 补丁：
+   SM8250/SM8150 与 cape 同代，它们的队列初始化序列可直接对照
