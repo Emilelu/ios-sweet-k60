@@ -859,3 +859,25 @@ RPMh 的 regulator 资源表 **cmd_db 在保留内存里，shim 可直接读**�
 **这样就不需要逆向或外部资料**：资源 ID 从设备自己的 cmd_db 里读，和 Android 内核拿到的是同一份。
 
 **之后**：RSC TCS 写入（v2.7/v3.0 偏移已备好）→ 拉 `vdd_mm` → 验证 → GCC disp 时钟 → disp_cc → DSI
+
+## 三十七、2026-10-22：cmd_db 解析首试 —— 未找到 vdd_mm（第 21 轮）
+
+实现了 `cmd_db_entry(name, *addr, *slv)`（`shim/ufs.c`）：
+- 校验 magic `db 30 03 0c`（在 `0x80860004`）
+- 遍历 2 个 rsc_hdr（`base+12` 起，每条 12 字节），按 `cnt` 遍历 28 字节固定长条目
+- `id[8]` 匹配名字，`addr` 在条目的 +20 处
+
+**实测**：`cmd_db_entry("vdd_mm")` **返回未找到**（停留 60s 标记）。
+
+**两种可能（下轮先分辨）**
+1. **基址或 magic 不符** → cmd_db 不在 `0x80860000`，或该 ROM 的 cmd_db 版本/布局不同
+2. **条目布局不同**（比如 `id` 在别的偏移、条目不是 28 字节、或 `NUM_PRIORITY` 不是 3）
+
+**下轮第一步（诊断，不猜）**
+把头部信息用时长信道分段报出来：
+- `hold 20` = magic 匹配 / `hold 30` = magic 不匹配（说明基址错）
+- 再报 `rsc_hdr[0].slv_id`、`cnt`（各占几位）
+这样一步就能定位是"地址错"还是"布局错"。
+
+**备选数据源**：Android 侧 `cmd-db` 在 debugfs 里有个目录但内容为空；
+另一个来源是 `dmesg` 里 RPMh 驱动的探测日志（会打印 cmd_db 地址与条目数）。
