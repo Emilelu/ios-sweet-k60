@@ -611,3 +611,30 @@ tx/rx symbol 0x87024/0x87028/0x870c0、clkref 0x9c000）——这些不依赖信
 ### 基线
 - `probe.sh` + 0 停留镜像 = **ANDROID 16 s**（当前基线）
 - 自校准后：`hold = 2 + 4*key`（sense key），init 失败 = 70 s 标记
+
+## 二十八、2026-10-22：UFS 命令通但设备从不 READY（第 11 轮）
+
+**扫描结果**：遍历 LUN 0–5，每个最多 25 次 `TEST UNIT READY`（带延时），
+**没有任何 LUN 返回 ready**（停留 100 s 标记命中）。
+
+**已确认能用的部分**
+- GCC 上电（`ufs_phy_gdsc` + `clkref/ahb/axi/unipro/phy_core/phy_aux/ice/tx_symbol`）
+- UFSHCI：UCRDY → HCE → UIC `DME_LINKSTARTUP` → UTRL 队列（stage 0）
+- SCSI 命令确实被发出了（用 CAP / READ 都拿到 SCSI 状态回包）
+
+**问题**
+- 所有 LU 一律 NOT READY / ABORTED COMMAND
+- 说明链路起来了但设备没被"唤醒到可服务状态"
+
+**下一步候选（按 UFS 规范顺序）**
+1. `START STOP UNIT`(0x1B) 带 power condition=1(active) 发给每个 LU
+2. UIC `DME_SET` 设置 `PA_Tactivate`／进入 fast/high-speed power mode（Linux ufshcd 在
+   link startup 之后会做 DME_GET `PA_MaxRxHSGear`、DME_SET `PA_TxGear`/`PA_RxGear` 等）
+3. `DME_GET` 读 **Unit Descriptor**：确认 `bLUEnable`、`bBootLunID`、逻辑块大小
+4. 若 3 显示 LU 未使能 → 需要 `DME_SET` `bLUEnable` 或用 "Configuration Descriptor" 配置
+5. 备选：跳过 SCSI，直接用 UIC 命令空间做诊断（读 descriptor 不依赖 LU ready）
+
+**工具状态**：`probe.sh` + 自校准 `report_at()`，标记间距 ≥20 s（因为 UFS 上电要等十几秒，
+内部耗时已不再污染读数）。
+
+**基线**：0 停留 = ANDROID 16 s；本次标记 20+10*lun（就绪）/100（都不就绪）/130（初始化失败）。
