@@ -799,3 +799,42 @@ UFS 设备配置这件事**需要用户明确同意**后再动。
    - 这是单一最大的技术门槛，但同样有公开参考实现
 2. 供电到位后：GCC disp 时钟 → `disp_cc` GDSC → MDP/DSI 时钟 → DSI PHY PLL → 面板初始化
 3. UFS 侧：UPIU 细节（TUR/Query 的 UTRD 组合）留待有日志通道后收尾
+
+## 三十五、2026-10-22：RPMh/RSC 参考实现已拆解（第 19 轮）
+
+抓取公开参考：`drivers/soc/qcom/rpmh-rsc.c`（1180 行）+ `rpmh-internal.h`。
+
+**RSC（apps_rsc = `0x17a00000`）TCS 寄存器布局**
+
+| 项 | v2.7 偏移 | v3.0 偏移 | 说明 |
+|---|---|---|---|
+| TCS 跨度 | 672 | 672 | 每个 TCS 的基址 = tcs_base + 672*tcs_id |
+| IRQ_ENABLE | 0x00 | 0x00 | |
+| IRQ_STATUS | 0x04 | 0x04 | |
+| IRQ_CLEAR | 0x08 | 0x08 | |
+| CMD_WAIT_FOR_CMPL | 0x10 | 0x20 | 写 1 触发该 TCS 执行 |
+| CONTROL | 0x14 | 0x24 | AMC 模式选择 |
+| STATUS | 0x18 | 0x28 | |
+| CMD_ENABLE | 0x1C | 0x2C | 激活命令掩码 |
+| 命令跨度 | 20 | 24 | 每条命令 |
+| CMD_MSGID | 0x30 | 0x34 | |
+| CMD_ADDR | 0x34 | 0x38 | 资源地址 |
+| CMD_DATA | 0x38 | 0x3C | 数据（电压/使能） |
+| CMD_STATUS | 0x3C | 0x40 | |
+| CMD_RESP_DATA | 0x40 | 0x44 | |
+
+**写一次 regulator 请求的流程（drivers/soc/qcom）**
+1. 选一个空闲 TCS（读 `STATUS`/`CMD_ENABLE` 判断）
+2. 写 `CMD_MSGID`（含 RPMH state：sleep/wake/active）、`CMD_ADDR`（资源地址）、`CMD_DATA`（电压 mv 或使能）
+3. 写 `CMD_ENABLE` 对应位
+4. 写 `CMD_WAIT_FOR_CMPL` 触发，轮询完成
+5. 可选：读 `IRQ_STATUS` 确认
+
+**还缺的信息（下轮补齐）**
+- RPMh 的 **cmd addr 编码**（cmd_db 里 `(resource << 16) | slave/offset`）——资源 ID 需要从
+  cmd_db（`/sys/kernel/debug/rpmh/cmd_db` 或 DT 里的 `qcom,cmd-db` 分区）查 `vdd_mm`/`vdd_mxa`
+- **MSGID 的 state 字段**（ACTIVE=0 / SLEEP=1 / WAKE=2 之类）
+- 版本判定：读 RSC 的 `DRV_SOLVER_CONFIG`/版本寄存器决定用 v2.7 还是 v3.0 偏移
+
+**结论**：RPMh 的实现路径已经完全清晰（有公开参考 + 寄存器表），剩下的只是"查资源 ID + 照流程写"。
+这是显示链唯一的前置门槛。
