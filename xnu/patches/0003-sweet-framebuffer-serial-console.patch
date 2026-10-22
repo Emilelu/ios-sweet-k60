@@ -2,7 +2,7 @@ diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
 index 997a4ab..db26bbe 100644
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -697,6 +697,148 @@ register_serial_functions(struct pe_serial_functions *fns)
+@@ -697,6 +697,149 @@ register_serial_functions(struct pe_serial_functions *fns)
  	gPESF = fns;
  }
  
@@ -21,8 +21,7 @@ index 997a4ab..db26bbe 100644
 +
 +extern unsigned char iso_font[256 * 16];
 +
-+/* 1 = 180 columns on the K60 panel: a panic line then fits without wrapping
-+ * into the rounded corners, where text is physically invisible. */
++/* 1 = 180 columns: panic lines fit without wrapping into the rounded corners */
 +#define FBCON_SCALE     1
 +#define FBCON_FG        0xffffffffu
 +#define FBCON_BG        0xff000000u
