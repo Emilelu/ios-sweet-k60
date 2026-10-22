@@ -771,3 +771,31 @@ UFS 设备配置这件事**需要用户明确同意**后再动。
 
 **⚠️ 本轮结论**：只读路径也还没打通，但**没有对设备做任何写操作**，风险为零。
 下轮先按 (1) 修正长度字段位置再试。
+
+## 三十四、2026-10-22：显示链起步 —— GCC 侧寄存器已就位（第 18 轮）
+
+从上游 `gcc-sm8450.c` 提取到显示相关时钟分支（GCC 基址 `0x100000`）：
+
+| 时钟 | enable 偏移 | Android 运行时状态 |
+|---|---|---|
+| `gcc_disp_hf_axi_clk` | `0x3700c` | 使能 |
+| `gcc_disp_sf_axi_clk` | `0x37014` | 使能 |
+| `gcc_qmip_disp_ahb_clk` | `0x37008` | 未使能 |
+
+**缺口**：`gcc_disp_ahb_clk` 与 `gcc_disp_xo_clk`（Android `clk_summary` 里都是使能状态）
+在**上游驱动里没有定义**——说明这个 ROM 的内核用了厂商扩展的时钟表。
+它们的偏移不能猜，需要从别处确认：
+- 设备侧 `clk_summary` 只给速率，不给寄存器
+- 备选：`/sys/kernel/debug/clk/<name>/` 无寄存器项；`regmap` 需要驱动支持
+- 备选：从 `imagefv`/`xbl` 逆向（此前确认载荷加密，成本高）
+
+**关键判断**：显示链的真正前置不是 GCC 这几个时钟，而是 **RPMh 的 `vdd_mm` / `vdd_mxa` 供电轨**
+（`clk_summary` 里这些时钟只是"软件已请求"，实际能否输出取决于供电域）。
+没有供电，GCC 写使能也不会真正出时钟 → `disp_cc` 依旧读不到。
+
+**下一步（按依赖顺序）**
+1. 实现 **RPMh/AOSS** 的 regulator 请求（RSC TCS 命令）：把 `vdd_mm`、`vdd_mxa` 拉到标称电压
+   - 参考：上游 `drivers/soc/qcom/rpmh-rsc.c` + `rpmh-regulator.c`（公开源码）
+   - 这是单一最大的技术门槛，但同样有公开参考实现
+2. 供电到位后：GCC disp 时钟 → `disp_cc` GDSC → MDP/DSI 时钟 → DSI PHY PLL → 面板初始化
+3. UFS 侧：UPIU 细节（TUR/Query 的 UTRD 组合）留待有日志通道后收尾
