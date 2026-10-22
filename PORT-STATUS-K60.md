@@ -713,3 +713,39 @@ Linux `ufshcd` 在 `DME_LINKSTARTUP` 之后还会做一串 UIC 操作，我们�
 
 **UFS 全链路进度**
 `GCC 上电 ✅ → UFSHCI 初始化 ✅ → UIC DME ✅ → HS-G4 协商 ✅ → LU 就绪 ❌ → SCSI 读写 ⏳`
+
+## 三十二、2026-10-22：TUR 失败定性为 SCSI 状态（第 15 轮）
+
+细分测量（先协商 HS-G4，再对 LUN 0 发一次 TUR）：
+
+| 观察 | 结论 |
+|---|---|
+| `rc = 4` | 命令**传输完成**，但设备返回了非零 **SCSI 状态**（CHECK CONDITION） |
+| 之前的 sense key | 2（NOT READY）/ 11（ABORTED） |
+
+**所以不是 UPIU/队列的 bug，也不是链路速率问题**——设备明确说"我还没准备好"。
+
+**最可能的根因**：ABL 交接后 UFS 设备的 **LU 配置丢失/未启用**。
+我们为了让 PHY 可用而重开了 `ufs_phy_gdsc`；如果 ABL 同时关掉了 UFS 设备供电（VCC），
+设备就会以上电默认状态回来——**LUN 全部未配置**（bLUEnable=0），此时任何 LU 都只会回
+NOT READY，`START STOP UNIT` 也无济于事。
+
+**要往前走，必须做 UFS 设备侧的 LU 配置**（写 Configuration Descriptor）：
+- 需要走 **UTP Query Request UPIU**（transaction type 0x07，opcode WRITE DESCRIPTOR 0x02）
+- 要写：`Device Descriptor` 的 `bNumberLU`、`bBootLunEn`，以及每个 LU 的
+  `Unit Descriptor`（`bLUEnable`、`bBootLunID`、`qLogicalBlockCount`、`bLogicalBlockSize`）
+
+⚠️ **风险（必须先确认）**：错误地写 Configuration Descriptor **会改变 LU 的尺寸/映射**，
+轻则 Android 读不到数据、重则**抹掉 userdata 的分区视图**。这是本项目目前唯一可能
+"真的把数据搞坏"的操作。
+
+**替代方案（无风险）**
+1. 在 shim 里**不重开 `ufs_phy_gdsc`**，而是先读取它原本的状态；若 ABL 已让 VCC 断电，
+   则 UFS 这条路在当前约束下不可行 → 改用**其它日志通道**（见下）
+2. 其它日志通道候选：
+   - `PSCI_SYSTEM_OFF` + 断电后 RAM 内容不可读（不可行）
+   - 把结果写进 **splash 保留区**，下一次 shim 启动再读（可做，但要两段式）
+   - 依赖 `hold` 时长的多比特信道（已可用，最慢但零风险）
+
+**当前建议**：先用"两段式 splash 保留区 + 时长信道"把 UFS 结论固化，
+UFS 设备配置这件事**需要用户明确同意**后再动。
