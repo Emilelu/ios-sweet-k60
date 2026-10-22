@@ -1221,3 +1221,28 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
 | **DSI 命令通道配置** | ✅ **ABL 留下了** |
 
 **下轮**：确认触发位 → 发 DCS `0x29` → 观察面板 → 发 `0x51` 亮度 → 推彩条。
+
+## 五十、2026-10-22：触发位定位受阻（第 35 轮）
+
+**目标**：找到 DSI 命令 DMA 的触发位（`CMD_DMA_CTRL` 的具体 bit），然后发 DCS `0x29`。
+
+**结果**：抓 `dsi_manager.c`（`msm_dsi_manager_cmd_xfer_trigger` 所在）时 **curl 超时**，
+寄存器位域解析也在同一次调用里被中断。这轮没拿到触发位，因此**没有动控制器**（
+不做没有依据的写操作）。
+
+**下轮第一步（两种取法，任一成功即可）**
+1. 重抓 `drivers/gpu/drm/msm/dsi/dsi_manager.c` → 看 `cmd_xfer_trigger` 实际写的寄存器/位
+2. 或直接从 `dsi.xml` 精确切出 `CMD_DMA_CTRL` 的 `<reg32 ...>...</reg32>` 块取位域名
+
+**当前所有已知硬件状态（全部实测）**
+| 层 | 状态 |
+|---|---|
+| GCC disp 时钟 | ✅ |
+| disp_cc GDSC / 内部时钟 | ✅ |
+| MDSS 寄存器 | ✅ |
+| DSI PHY | ✅ |
+| DSI PLL | ✅ 仍锁定 |
+| DSI 控制器时钟 | ✅ 仍开着 |
+| DSI 命令通道配置 | ✅ ABL 留下 |
+
+**结论不变**：只差"触发位 + 发一条 DCS"，就能验证面板能否被我们唤醒。
