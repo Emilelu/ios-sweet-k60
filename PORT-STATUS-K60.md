@@ -1075,3 +1075,29 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
  → MDSS 可读 ✅ → DSI PHY 可访问 ✅ → **PLL 仍在跑 ✅（白捡）**
   → DSI 控制器状态 ⏳ → 面板唤醒 ⏳ → 我们自己的首帧 ⏳
 ```
+
+## 四十五、2026-10-22：DSI 控制器寄存器表获取受阻（第 30 轮）
+
+**目标**：读 DSI 控制器（`0xae94000`）状态，判断 ABL 是否留下可用的 command-mode 配置，
+然后尝试发 DCS `0x29`(Display On) 唤醒面板。
+
+**遇到的障碍**：寄存器表拿不全
+- `registers/display/dsi_7nm.xml` 只有 3 KB，是 include 用的存根，不含实际偏移
+- `registers/display/dsi.xml` 抓取失败（返回空）
+- GitHub raw / jsdelivr 镜像此前有 429 限流
+
+**下轮取寄存器偏移的三条路（按成本排序）**
+1. 抓 `drivers/gpu/drm/msm/dsi/dsi_host.c`（它直接使用 `REG_DSI_*` 宏，可反推常用偏移）
+2. 从 Android 侧 `dmesg` 或 debugfs 的 msm_drm 节点看 DSI 寄存器 dump
+3. 用 `dsi_7nm.xml` 的 include 链补全（需看清它 include 的文件名）
+
+**已有结论不变**（这轮最重要的仍是上一轮的发现）
+- DSI PLL **仍在运行**（`CMN_PLL_CNTRL` bit0 = 1）
+- 显示链只剩：DSI 控制器配置 → 面板唤醒 → 我们自己的首帧
+
+**显示链进度**
+```
+GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
+ → MDSS 可读 ✅ → DSI PHY 可访问 ✅ → PLL 仍在跑 ✅
+  → DSI 控制器状态 ⏳ → 面板唤醒 ⏳ → 我们自己的首帧 ⏳
+```
