@@ -1138,3 +1138,34 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
   → 发 DCS 唤醒面板 ⏳ → 推我们自己的帧 ⏳
 ```
 只剩最后两级。
+
+## 四十七、2026-10-22：DSI 命令发送机制查清（第 32 轮）
+
+上游 `dsi_host.c` 确认：**DSI 命令不是"写寄存器就发"，而是 DMA 方式**：
+
+```
+构造 DSI 包到一段 DMA 内存  →  程序控制器的 DMA base/length  →  触发  →  等完成中断
+```
+- `dsi_cmd_dma_tx()` 取 `dma_base`，调用 `msm_dsi_manager_cmd_xfer_trigger(id, dma_base, len)`
+  然后等 200 ms 完成
+- `DSI_CMD_CFG1` 里要设 `WR_MEM_START`(MIPI_DCS_WRITE_MEMORY_START=0x2C) 与 `WR_MEM_CONTINUE`，
+  并置 `INSERT_DCS_COMMAND`
+- 长写像素走 `MIPI_DSI_DCS_LONG_WRITE`(0x39) + 压缩模式 `DATATYPE`
+
+**DSI 包格式（我们下轮要自己构造）**
+| 场景 | 字节 |
+|---|---|
+| 短写 DCS（如 0x29 Display On） | `05 29 00`（DT, 数据, ECC） |
+| 长写（像素） | `39 WC_lo WC_hi data... ECC` |
+
+**下轮还需补齐的寄存器偏移**（`dsi.xml` 里继续挖）
+- `DMA_BASE` / `DMA_BASE_OFFSET`、`DMA_LEN`（控制器的 DMA 地址/长度）
+- `INT_CTRL` / `INT_STATUS`（发送完成与错误位）
+- `CMD_CFG0/1` 的确切位域
+
+**显示链进度（不变）**
+```
+… PLL 仍在跑 ✅ → DSI 控制器时钟仍在 ✅ → 构造并发送 DCS 0x29 ⏳ → 推我们自己的帧 ⏳
+```
+
+**注**：这一级比前几级精细得多（DMA 包 + ECC + 完成中断），预计还要 2–3 轮。
