@@ -1169,3 +1169,30 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
 ```
 
 **注**：这一级比前几级精细得多（DMA 包 + ECC + 完成中断），预计还要 2–3 轮。
+
+## 四十八、2026-10-22：DSI 控制器寄存器表补齐（第 33 轮）
+
+从 `registers/display/dsi.xml` 提全了发送命令所需的全部寄存器（DSI0 基址 `0xae94000`）：
+
+| 寄存器 | 偏移 | 用途 |
+|---|---|---|
+| `CMD_DMA_CTRL` | `0x038` | 命令 DMA 控制（含 LP/触发位） |
+| `CMD_CFG0` | `0x03c` | 命令模式配置 0 |
+| `CMD_CFG1` | `0x040` | 命令模式配置 1（`WR_MEM_START`/`INSERT_DCS_COMMAND`） |
+| `DMA_BASE` | `0x044` | 命令包 DMA 物理地址 |
+| `DMA_LEN` | `0x048` | 命令包长度 |
+| `ACK_ERR_STATUS` | `0x064` | 错误确认 |
+| `DLN0_PHY_ERR` | `0x0b0` | 物理层错误 |
+| `ERR_INT_MASK0` | `0x108` | 错误中断掩码 |
+| `CMD_MODE_MDP_CTRL2` | `0x1b4` | command-mode MDP 控制 |
+| `CMD_MODE_MDP_STREAM2_CTRL` | `0x1b8` | 流控制 |
+
+**下轮实现顺序（发 DCS `0x29` Display On）**
+1. 在低地址 DMA 缓冲（`0xb8003000`）构造 DSI 短包：`{0x05, 0x29, 0x00(ECC)}`
+2. `DMA_BASE = 0xb8003000`、`DMA_LEN = 3`
+3. 读 `CMD_DMA_CTRL` / `CMD_CFG1` **当前值**（ABL 可能已配置好），只改必要的触发位
+4. 触发 → 轮询 `INT_STATUS`/`ACK_ERR_STATUS` 判断成功
+5. 若 `0x29` 成功（屏暗亮）→ 发 `0x51` 亮度 → 用 `WR_MEM_START/WR_MEM_CONTINUE` 推彩条
+
+**关键策略**：**先读后写**——ABL 可能已经把控制器配成可用状态（PLL 和时钟都还在），
+所以第一步是读 `CMD_DMA_CTRL`/`CMD_CFG1` 的现状，而不是从头编程。
