@@ -21,7 +21,9 @@ index 997a4ab..db26bbe 100644
 +
 +extern unsigned char iso_font[256 * 16];
 +
-+#define FBCON_SCALE     2
++/* 1 = 180 columns on the K60 panel: a panic line then fits without wrapping
++ * into the rounded corners, where text is physically invisible. */
++#define FBCON_SCALE     1
 +#define FBCON_FG        0xffffffffu
 +#define FBCON_BG        0xff000000u
 +
