@@ -1196,3 +1196,28 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
 
 **关键策略**：**先读后写**——ABL 可能已经把控制器配成可用状态（PLL 和时钟都还在），
 所以第一步是读 `CMD_DMA_CTRL`/`CMD_CFG1` 的现状，而不是从头编程。
+
+## 四十九、2026-10-22：ABL 把 DSI 命令通道也留成了可用状态（第 34 轮）
+
+读 `DSI0`（`0xae94000`）的 `CMD_CFG0(0x3c)` / `CMD_CFG1(0x40)` / `DMA_BASE(0x44)` /
+`CMD_DMA_CTRL(0x38)`：**至少一个非零** → **命令通道配置还在**。
+
+**这几乎把显示链压缩成三步**：
+1. 把 DSI 短包写进低地址 DMA 缓冲（`0xb8003000`）：`05 29 00`
+2. 写 `DMA_BASE = 0xb8003000`、`DMA_LEN = 3`（保留原有其它位）
+3. 触发发送（触发位在 `CMD_DMA_CTRL` 里，需要从 `dsi_host.c` 的
+   `msm_dsi_manager_cmd_xfer_trigger` → DSI 控制器驱动里确认具体 bit）
+
+**已知的硬件状态（全部实测）**
+| 层 | 状态 |
+|---|---|
+| GCC disp 时钟（hf/sf_axi） | ✅ 可开 |
+| disp_cc GDSC | ✅ 可开 |
+| disp_cc 内部时钟（AHB/MDP/byte0） | ✅ 可开 |
+| MDSS 寄存器 | ✅ 可读 |
+| DSI PHY | ✅ 可访问 |
+| **DSI PLL** | ✅ **仍锁定运行** |
+| **DSI 控制器时钟** | ✅ **仍开着** |
+| **DSI 命令通道配置** | ✅ **ABL 留下了** |
+
+**下轮**：确认触发位 → 发 DCS `0x29` → 观察面板 → 发 `0x51` 亮度 → 推彩条。
