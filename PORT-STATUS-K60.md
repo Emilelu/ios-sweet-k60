@@ -580,3 +580,34 @@ tx/rx symbol 0x87024/0x87028/0x870c0、clkref 0x9c000）——这些不依赖信
 2. 结果用时长信道编码（stage 1..7，`hold = 2 + 3*stage`），一轮 ~20-60 s
 3. 通了就写日志文件；之后转显示（用同样的 `gcc_disp_*` + `disp_cc` 思路，
    目标速率照抄 `clk_summary.txt`：dsiclk 200MHz / byteclk 150MHz / pclk0 200MHz）
+
+## 二十七、2026-10-22：信道纠错 + UFS 读到 sense key（第 10 轮）
+
+### 信道三处修正（都是我的工具 bug）
+
+1. **`probe.sh` 的 Android 检测写错了**：只匹配 Google VID `18d1:4ee7`，
+   而这台机器 Android 侧是 **Xiaomi VID `2717:ff48`** → 之前大量"device not on USB"/FAIL 都是误报。
+   已改成用 `adb devices` 判断。
+2. **IMEM reason 信道确认无效**：用修好的 harness 复测，`reason=1`（要求 fastboot）仍然进 Android。
+   → 二元信道不存在，别再指望它。
+3. **时长为编码被内部耗时污染**（重试/等就绪会加几秒到几十秒）→ 已实现**自校准**：
+   `report_at(ms)` 以 shim 入口时刻为基准等到目标时间，内部工作耗时不再影响测量。
+
+### UFS 进展
+
+| 步骤 | 结果 |
+|---|---|
+| GCC 上电（gdsc + 8 个时钟） | ✅ |
+| UFSHCI：UCRDY / HCE / UIC DME_LINKSTARTUP / UTRL 队列 | ✅ |
+| `TEST UNIT READY` 等待就绪（带延时轮询） | ✅ 设备最终 READY |
+| `READ(10)` LBA 1 | ❌ 返回 **sense key ≈ 11（ABORTED COMMAND）** |
+
+**下一步候选**
+1. `START STOP UNIT`(0x1B, START=1) 让 LU 进入 active power mode 后再读
+2. 核对 UPIU 的 "Expected Data Transfer Length" 与 PRDT 的 DBC 是否一致（4096 vs 4096）
+3. 读 UFS **Unit Descriptor**（UIC `DME_GET`）确认 bLUEnable / bBootLunID / 逻辑块大小
+4. 确认 LUN 号：ABL 用的可能是 LUN 0，但 UFS 的 "boot LUN" 映射可能把 LU 编号偏移
+
+### 基线
+- `probe.sh` + 0 停留镜像 = **ANDROID 16 s**（当前基线）
+- 自校准后：`hold = 2 + 4*key`（sense key），init 失败 = 70 s 标记

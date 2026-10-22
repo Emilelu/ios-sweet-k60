@@ -4,7 +4,7 @@
 #   probe.sh <img>          ->  "ANDROID <secs>" | "FASTBOOT <secs>" | error
 S=ffec9d48
 fb()  { lsusb 2>/dev/null | grep -qi 18d1:d00d; }
-an()  { lsusb 2>/dev/null | grep -qi 18d1:4ee7; }
+an()  { adb devices 2>/dev/null | grep -q $S; }   # Xiaomi uses VID 2717, not 18d1, for Android
 say() { echo "[probe] $*"; }
 
 ensure_abl_fastboot() {
