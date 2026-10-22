@@ -313,3 +313,32 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 
 **Q1 的含义**：UFS 控制器不能沿用 ABL 的现场，需要自己跑 UFSHCI 初始化
 （HCE、UIC DME_LINKSTARTUP、UTRL/UTRD 队列）——这是拿到任何日志的前置条件。
+
+## 十六、2026-10-22：UFS 主机初始化实测（A 项）
+
+用二元信道逐级二分（`-DK60_UFSGT -DK60_GT=<k>`，PASS→fastboot / FAIL→Android）：
+
+| 阶段 | 内容 | 结果 |
+|---|---|---|
+| 1 | 等 `HCS.UCRDY` | ✅ 过 |
+| 2 | 置 `HCE` | ✅ 过 |
+| 3 | UIC `DME_LINKSTARTUP` 完成位 | ✅ 过 |
+| 4 | UIC 结果码 == 0 | ✅ 过 |
+| 5 | `HCS.DP`（UniPro 链路 DP 起来） | ✅ 过 |
+| 6 | 写 `UTRLRSR=1` 后 run 位读回 1 | ✅ 过 |
+| 7 | 写 `UTRLBA/BAU` 后读回等于我们的地址 | ❌ **卡在这里** |
+
+**结论**：`ufs_host_init()` 的链路层完全打通了（HCE + UniPro link up），
+只差最后一步——控制器不接受我们写的请求队列基址。可能原因：
+64 位寻址模式、UTRL 基址必须在 4 GiB 以下/特定对齐域、或该 UFSHCI 版本要求先写
+`UTRLBA` 再置 `UTRLRSR`（顺序已试）、或 0x50 偏移在本版本被重映射。
+**下一步**：读回 `CAP`（含 `64AS` 位）、`VER`、`UTRLBA` 实际值，用二元信道对比猜测值。
+
+代码状态：`shim/ufs.c` 新增 `ufs_host_init()`（UCRDY→HCE→UIC link start→UTRL），
+`ufs_take_over()` 已改为调用它，`-DK60_UFSGT/-DK60_GT=<k>` 与 `-DK60_BIN/-DK60_Q=<n>`
+为二分探针模板。所有镜像必须 `HDRVER=4`。
+
+## 十七、B 项（显示供电链）—— 未开始
+
+已确认 `disp_cc` 整块不可访问（Q5 FAIL），需要先在 RPMh/AOSS 上把 `vdd_mm` / `vdd_mxa`
+供起来、再打开 GCC 的 `iface` 时钟，disp_cc 才可能读通。这是下一步 B 的前置。
