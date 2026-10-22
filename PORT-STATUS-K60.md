@@ -1015,3 +1015,36 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅ → MDSS �
   `[00 27 0a 0a 1b 25 0a 0b 0b 0a 02 04 20 0f]`，以及 `panel-clockrate = 1.2 GHz`
 - 参考实现：上游 `drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c`（SM8450 用的 5nm/4nm 版）
 - 验收：读 PHY 的 PLL lock 状态位（用时长信道）
+
+## 四十三、2026-10-22：DSI PHY 可访问（第 28 轮）
+
+**验收标准（按用户要求定死）**：只认"我们自己的像素出现在屏幕上"——
+不看 MI logo / 开机动画 / 任何 ABL 残留；必须是我们自己的 DSI 驱动初始化面板后
+主动推上去的帧。
+
+**本轮进展**：取到 DSI PHY 寄存器表（`drivers/gpu/drm/msm/registers/display/dsi_phy_7nm.xml`）：
+
+| 寄存器 | 偏移 | 用途 |
+|---|---|---|
+| `REVISION_ID0` | 0x000 | PHY 身份 |
+| `CLK_CFG0` | 0x010 | 时钟配置 |
+| `GLBL_CTRL` | 0x018 | 全局控制 |
+| `PLL_CNTRL` | 0x03c | PLL 使能/控制 |
+| `PLL_LOCK_OVERRIDE` | 0x190 | 锁定检测覆盖 |
+| `PLL_LOCK_DELAY` | 0x194 | 锁定延时 |
+
+**实测**：`disp_bring_up()` 之后读 DSI PHY（`0xae94400`）的 `REVISION_ID0`/`CLK_CFG0`/`PLL_CNTRL`
+至少一个非零 → **DSI PHY 块可访问** ✅
+
+**显示链进度**
+```
+GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
+ → MDSS 可读 + HW_VERSION ✅ → DSI PHY 可访问 ✅
+  → PLL 配置 ⏳ → 面板 on-command ⏳ → 我们自己的首帧 ⏳
+```
+
+**下轮（PLL 配置，显示链最后的技术难关）**
+1. 按 `dsi_phy_7nm.c` 的顺序写 PLL：`CLK_CFG0` → 分频/倍频 → `PLL_LOCKDET_RATE_*` →
+   `PLL_LOCK_OVERRIDE`(0x80) → `PLL_LOCK_DELAY` → `PLL_CNTRL` 使能
+2. 输入参数：DTS 的 `phy-timings = [00 27 0a 0a 1b 25 0a 0b 0b 0a 02 04 20 0f]` + `panel-clockrate=1.2GHz`
+3. 验收：读 PLL lock（`PLL_CNTRL`/状态位）——用时长信道
