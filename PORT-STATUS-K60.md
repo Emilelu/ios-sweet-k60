@@ -495,3 +495,25 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 1. 用 debugfs 的 `clk/<name>/` 节点把每个必需时钟的 **enable 寄存器偏移/位** 读出来（clk 子系统 debugfs 通常有 `reg`、`parent`、`rate`）
 2. 按这份清单在 shim 里实现 GCC 侧使能（disp/ufs 各一组），再用二元信道验证"块可读"
 3. UFS 通了之后接 UFSHCI 初始化；显示方向接 disp_cc/DSI
+
+## 二十四、2026-10-22：判定链失效（Q65 自检失败）—— 必须先修工具
+
+**最后一道自检**：`K60_BIN` 里加 `Q=65`（不做任何事、`pass=1`、直接写 reason 回 fastboot）。
+**结果 FAIL（进了 Android）**，而这正是我们之前用来证明"信道可用"的同一条代码路径。
+
+已核实：镜像里确实包含 `0x77665500` 与 IMEM 地址常量（反汇编 2/2 命中），
+`_end=0x2a000` 与 Image 大小 172032 一致，`.bss` 86 KB 正常。
+
+**因此**：本轮 Q40–Q64 的所有 FAIL **不能作为结论**（可能是代码没跑到，也可能是 reason 未生效，
+两者在 FAIL 分支上不可区分）。唯一可信的判据是 **PASS**（因为只有真的写到 reason 才会进 fastboot）。
+
+**下次开工必须先做的三件事（工具优先）**
+1. 让 `Q65` 重新 PASS：对比 `v4-write.img`（同代码路径、已知能进 fastboot）与本轮镜像的差异
+   （最可能：Image 从 221184 缩到 172032 后，某处布局/偏移假设变了；或 ask.sh 的 30 s 等待窗口太短）
+2. `ask.sh` 增加"UNKNOWN 区分"与更长的 fastboot 枚举等待（把 30 s 提到 90 s）
+3. 只有在 Q65 PASS 之后，才重新跑 Q43（UFS 块可读）/Q62（GICD 对照）/Q60（GCC UFS 上电）
+
+**本轮唯一确定的新资产**：`dump/clk_summary.txt` / `dump/regulator_summary.txt`
+（Android 真实时钟树与供电清单）以及 `ufs.c` 里 `gcc_ufs_bring_up()` 的寄存器偏移表
+（gdsc 0x87004、ahb 0x87020、axi 0x87018、ice 0x8706c、unipro 0x87064、phy_aux 0x870a4、
+tx/rx symbol 0x87024/0x87028/0x870c0、clkref 0x9c000）——这些不依赖信道，可直接用。
