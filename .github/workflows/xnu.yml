@@ -49,7 +49,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: dxb
-          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v2' }}
+          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v3' }}
 
       - name: Fetch build script
         if: steps.bcache.outputs.cache-hit != 'true'
@@ -150,7 +150,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: dxb
-          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v2' }}
+          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v3' }}
 
       - uses: actions/upload-artifact@v4
         if: always()
