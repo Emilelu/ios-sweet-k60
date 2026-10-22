@@ -550,3 +550,33 @@ tx/rx symbol 0x87024/0x87028/0x870c0、clkref 0x9c000）——这些不依赖信
 2. 用时长信道重测三条地基：UFS 块是否可读（Q43）、GCC UFS 上电（Q61）、GICD 对照（Q62）
    —— 每条都用「hold = 2s + 5s*code」编码，比二元信道信息量大且不依赖 reason
 3. 通过后再继续 UFSHCI 初始化 / disp_cc
+
+## 二十六、2026-10-22：GCC UFS 上电成功 —— UFS 与 GICD 都活了（重大）
+
+**脚本统一**：新增 `probe.sh` —— 唯一入口，自己处理三种设备状态
+（ABL fastboot / fastbootd / Android），先确保 ABL fastboot、发镜像、等 hand-off、
+再报落地结果。不再手动切模式。基线实测：0 停留镜像 = `ANDROID 16s`。
+
+**多比特时长探针 `timing.img`（hold = 2s + 3s*code）**
+
+| 项 | 结果 |
+|---|---|
+| 总耗时 | **63 s**（基线 16 s → 停留 ≈47 s） |
+| 解出 code | **15 = 0b1111** |
+| bit0 UFS `HCS` 可读 | ✅ **通** |
+| bit1 UFS PHY GDSC 上电 | ✅ **通**（`gcc_ufs_bring_up()` 生效） |
+| bit2 GICD_TYPER 可读 | ✅ **通**（说明 shim 的 MMIO 读本身没问题） |
+| bit3 恒 1（有效性） | ✅ |
+
+**意义（推翻了上一轮的悲观结论）**
+- 之前的 `CAP=0 / HCS=0 / GICD=0` 全是**信道失效**造成的假象，**不是硬件被彻底关死**
+- 只要先按 `gcc_ufs_bring_up()` 把 `ufs_phy_gdsc` + `clkref/ahb/axi/unipro/phy_aux/ice/tx_symbol`
+  打开，**UFS 控制器寄存器块就变得可读**
+- GICD 可读 → shim 的物理地址访问、MMU 状态都正常
+
+**下次开局动作**
+1. 把 `gcc_ufs_bring_up()` 接进 `ufs_take_over()`：先上电再走 UFSHCI 初始化
+   （UCRDY → HCE → DME_LINKSTARTUP → UTRL 队列 → READ(10) → GPT 查 `opcust`）
+2. 结果用时长信道编码（stage 1..7，`hold = 2 + 3*stage`），一轮 ~20-60 s
+3. 通了就写日志文件；之后转显示（用同样的 `gcc_disp_*` + `disp_cc` 思路，
+   目标速率照抄 `clk_summary.txt`：dsiclk 200MHz / byteclk 150MHz / pclk0 200MHz）
