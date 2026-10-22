@@ -957,3 +957,35 @@ RPMh 供电 (vdd_mm/vdd_mxa)
 
 **K60 与 sweet 的本质差异（一句话）**：sweet 的 ABL 把"已点亮的面板"和"可用的 UFS"
 都白送；K60 的 ABL 两样都收回，所以移植量级从"改常量"变成"写驱动栈"。
+
+## 四十一、2026-10-22：显示子系统已通电可访问（第 25 轮，重大）
+
+之前 Q5「disp_cc 读不到」用的是坏掉的 harness（`an()` VID bug），结论不可信。用修好的
+harness 重做，结果完全反转：
+
+| 步骤 | 结果 |
+|---|---|
+| `gcc_disp_hf_axi_clk`(0x3700c) + `sf_axi_clk`(0x37014) 使能 | ✅ 都锁住了 |
+| `disp_cc` GDSC（`0xaf09000`）清 SW_COLLAPSE | ✅ **`PWR_ON=1`** |
+| `disp_cc` 寄存器块可访问 | ✅（GDSCR 读回即证据） |
+| **MDSS（`0xae00000`）可访问** | ✅✅ |
+
+**重大结论：不需要 RPMh 就能到达这一步。** ABL 交接时并没有断掉 `vdd_mm`/`vdd_mxa`
+（可能保留了给 AOP/显示），我们只需要把 GCC 的显示时钟和 `disp_cc` 的 GDSC 重新打开，
+显示子系统就活了。之前"必须先做 RPMh"的判断过于悲观。
+
+**踩坑记录**：判断 `disp_cc` 是否可访问**不能用 `0x8324`（AHB RCG）**——那个寄存器本来就
+没被编程、天然读 0；要改用 `GDSCR(0x9000)`，因为它会被我们自己的写改变。
+
+**下一步（显示链 5 级里的第 2→4 级）**
+1. 使能 `disp_cc` 内部时钟：AHB `0x80a4`、MDP `0x800c`、byte0 `0x8028` / intf `0x802c`
+2. 读 MDSS `HW_VERSION`（`0xae00000+0x0`）确认型号与 SDE 版本
+3. DSI PHY PLL（`0xae94400`）：按 DTS 的 14 字节 phy-timings + `panel-clockrate=1.2GHz` 配置，读 lock 位
+4. 面板初始化：`n11a` 的 `mdss-dsi-on-command`（60Hz 用 timing@0）
+5. 首帧：command mode 直推（DSC 8bpp 处理方案待定）
+
+**显示链进度**
+```
+GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc/MDSS 可访问 ✅
+ → disp_cc 内部时钟 ⏳ → DSI PHY PLL ⏳ → 面板初始化 ⏳ → 首帧 ⏳
+```
