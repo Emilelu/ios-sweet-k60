@@ -638,3 +638,32 @@ tx/rx symbol 0x87024/0x87028/0x870c0、clkref 0x9c000）——这些不依赖信
 内部耗时已不再污染读数）。
 
 **基线**：0 停留 = ANDROID 16 s；本次标记 20+10*lun（就绪）/100（都不就绪）/130（初始化失败）。
+
+## 二十九、2026-10-22：START STOP UNIT 无效（第 12 轮）
+
+对 LUN 0–5 各发 `START STOP UNIT`(0x1B, START=1, power condition=0 active) 后再轮询
+`TEST UNIT READY`：**仍然没有任何 LU 就绪**（停留 100 s 标记）。
+
+**当前 UFS 状态汇总**
+
+| 环节 | 状态 |
+|---|---|
+| GCC 上电（GDSC + 8 时钟） | ✅ |
+| UFSHCI 初始化（UCRDY/HCE/UIC DME_LINKSTARTUP/UTRL） | ✅ |
+| SCSI 命令执行 + 收到 sense | ✅（sense key 2 NOT READY / 11 ABORTED） |
+| LU 进入可服务状态 | ❌（TUR/SSU 都不行） |
+
+**最可能缺失的步骤：UIC 的 gear/mode 协商**
+Linux `ufshcd` 在 `DME_LINKSTARTUP` 之后还会做一串 UIC 操作，我们全跳过了：
+`DME_GET(PA_MaxRxHSGear)` → `DME_SET(PA_TxGear/PA_RxGear/PA_TxTermination/PA_RxTermination)`
+→ `DME_SET(PA_HSSeries)` → `DME_SET(PA_PWRMode = FAST_MODE)` → 再 `DME_SET(PA_Tactivate)`。
+没有协商到高速模式时链路仍停在 PWM 慢速档，命令可能超时（我们的 `scsi()` 超时是 1 s）。
+
+**下一步（明确）**
+1. 实现 UIC `DME_GET/DME_SET`（opcode 0x16/0x17 + attribute selector），先读
+   `PA_MaxRxHSGear` 确认对端能力，再按 ufshcd 的顺序设置 gear/power mode
+2. 然后用 `DME_GET` 读 Unit Descriptor（`bLUEnable`、逻辑块大小），不经 SCSI
+3. 上述都通了再重试 TUR → READ(10)
+
+**风险提示**：这条线比上游项目深很多（sweet 的 ABL 把 UFS 留在可用状态），
+预计还要 3–5 轮才能拿到第一次成功的块读。
