@@ -1101,3 +1101,40 @@ GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
  → MDSS 可读 ✅ → DSI PHY 可访问 ✅ → PLL 仍在跑 ✅
   → DSI 控制器状态 ⏳ → 面板唤醒 ⏳ → 我们自己的首帧 ⏳
 ```
+
+## 四十六、2026-10-22：DSI 控制器时钟仍在 + 命令寄存器位域到手（第 31 轮）
+
+**实测**：`DSI0 CLK_STATUS(0xae9411c)` 的 **bit0 = 1** → **DSI 控制器核心时钟仍然开着**
+（和上一轮 PLL 仍锁定一致：ABL 只关了面板输出，PHY/控制器都还活着）。
+
+**同时拿到 DSI 寄存器表**（`registers/display/dsi.xml`，19 KB）：
+
+| 寄存器 | 偏移 |
+|---|---|
+| `CTRL` | 0x000 |
+| `CMD_DMA_CTRL` | 0x038 |
+| `CLK_CTRL` | 0x118 |
+| `CLK_STATUS` | 0x11C |
+
+**命令/像素路径的关键位域**
+| 位域 | 位 | 用途 |
+|---|---|---|
+| `DATA_TYPE` | [5:0] | DCS 数据类型（短写 = 0x05，长写 = 0x39） |
+| `VIRTUAL_CHANNEL` | [9:8] | VC |
+| `WORD_COUNT` | [31:16] | 字数 |
+| `WR_MEM_START` | [7:0] | `0x2C` write_memory_start |
+| `WR_MEM_CONTINUE` | [15:8] | write_memory_continue |
+
+**下轮（离"我们自己的像素"最近的一步）**
+1. 用 `CMD_DMA_CTRL` 发 **DCS 短写 `0x29`（Display On）**：`DATA_TYPE=0x05`、`WORD_COUNT=1`、payload=`0x29`
+2. 若面板亮起（显示黑屏变为暗亮/闪一下）→ 成功唤醒
+3. 再发 `0x51`(亮度) 提高亮度
+4. 然后用 `WR_MEM_START/WR_MEM_CONTINUE` 推一小块彩条 → **验收"我们自己的像素"**
+
+**显示链进度**
+```
+GCC disp 时钟 ✅ → disp_cc GDSC ✅ → disp_cc 内部时钟 ✅
+ → MDSS 可读 ✅ → DSI PHY 可访问 ✅ → PLL 仍在跑 ✅ → **DSI 控制器时钟仍在 ✅**
+  → 发 DCS 唤醒面板 ⏳ → 推我们自己的帧 ⏳
+```
+只剩最后两级。
