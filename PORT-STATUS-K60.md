@@ -749,3 +749,25 @@ NOT READY，`START STOP UNIT` 也无济于事。
 
 **当前建议**：先用"两段式 splash 保留区 + 时长信道"把 UFS 结论固化，
 UFS 设备配置这件事**需要用户明确同意**后再动。
+
+## 三十三、2026-10-22：只读 Query Descriptor 首试 —— OCS 错误（第 16 轮）
+
+按"零风险只读取证"路线，实现了 UTP **Query Request UPIU**（transaction type `0x07`）：
+- `query_desc(lun, idn, index, sel, len, buf)`：构造 query UPIU → 走 UTRD/UTRL → 等完成 →
+  校验 response UPIU 类型 `0x37` → 校验 OCS
+- 导出 `ufs_read_unit_desc(lun, buf, len)` / `ufs_read_device_desc(buf, len)`
+- 探针 `K60_QDESC`：协商 HS-G4 后读 LUN 0 的 Unit Descriptor，用 `bLUEnable` 判定设备是否已配置
+
+**结果：查询失败，`rc = 2`（OCS 错误）** —— 控制器报告该 UTRD 执行出错。
+
+**最可能的原因（下轮逐个试）**
+1. **query UPIU 的长度字段位置**：我把 `length` 放在 bytes 10-11，Linux 用
+   `UPIU_HEADER_DWORD(0, 0, length >> 8, length)` 写 **dword_2（bytes 8-11）**，
+   即第 3、4 字节是 `length>>8, length` —— 需要严格对齐（另外 EDTL 也要一致）
+2. **`index` / `selector` 语义**：读 Unit Descriptor 时 `index` 应该是 LU 号，
+   `selector` 可能是 0；读 Device Descriptor 时 LUN 字段应为 0
+3. **response UPIU 期望长度**：`utrl[0].resp` 的 512/4 设置是否适用于 query
+4. UTRD 的 `dw2 = 0x0f`（OCS 无效标记）在 query 下是否适用
+
+**⚠️ 本轮结论**：只读路径也还没打通，但**没有对设备做任何写操作**，风险为零。
+下轮先按 (1) 修正长度字段位置再试。
