@@ -454,3 +454,44 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 
 **当前主结论不变**：UFS 与显示在 ABL 交接后都断电/断时钟，
 必须先做 GCC 时钟 + RPMh 供电，才谈得上 UFSHCI 初始化或点屏。
+
+## 二十三、2026-10-22：Android debugfs 插桩 —— 拿到"标准答案"（重大）
+
+`debugfs` 在这个 ROM 里默认没挂载，但 root 可以挂（`mount -t debugfs none /sys/kernel/debug`）。
+挂上后直接读出 Android 驱动真实配置的时钟树与供电状态，**这就是我们自己做 bring-up 要照抄的目标**。
+
+已存盘：`dump/clk_summary.txt`（486 行）、`dump/regulator_summary.txt`（254 行）。
+
+**显示侧（Android 运行时的真实值）**
+
+| 时钟 | 速率 | 说明 |
+|---|---|---|
+| `dsi0_phy_pll_out_dsiclk` | 200 MHz | DSI PHY PLL 输出（不是 1.2GHz，PLL 有分频） |
+| `disp_cc_mdss_pclk0_clk_src` / `pclk0_clk` | 200 MHz | 像素时钟 |
+| `dsi0_phy_pll_out_byteclk` | 150 MHz | byte clock |
+| `disp_cc_mdss_byte0_clk_src` / `byte0_clk` | 150 MHz | |
+| `disp_cc_mdss_byte0_div_clk_src` / `byte0_intf_clk` | 75 MHz | |
+| `gcc_disp_xo_clk` / `sf_axi` / `hf_axi` / `ahb` | 使能 | GCC 侧显示基础设施 |
+
+**UFS 侧**
+
+| 项 | 状态 |
+|---|---|
+| `gcc_ufs_phy_gdsc` | **已使能**（regulator 列表里 count=1, normal） |
+| `gcc_ufs_phy_ahb_clk`、`gcc_ufs_0_clkref_en` | 使能 |
+| `ufs_phy_tx/rx_symbol_*_clk` | 使能 |
+| `ufshc` 供电 | `vdd-hba`、`vcc`、`vccq`、`vddp-ref-clk`、`vdda-phy` 全部在 |
+
+**意义**：不用猜、不用逆 ABL——直接照着这份总结在 shim 里把同样的时钟/供电打开即可。
+`debugfs` 还可继续挖：`/sys/kernel/debug/clk/<name>/`（每个时钟的父/速率/寄存器）、
+`regulator_summary` 的电压、以及可能的 `ufs`/`drm` 调试节点。
+
+**本轮其它探针（结论有限）**
+- Q52/Q53：想用「ABL 传入的 FDT magic」当"内存读正常"的对照，但 **v4 镜像下 x0 不一定给 DTB**
+  （v3+ 的 DTB 在 vendor_boot 里），所以该对照**无效**，不能据此判断 MMIO 读是否正常
+- Q49/Q50：TLMM GPIO0 配置读数为 0 —— 也可能只是该引脚未配置，同样不能下结论
+
+**下一步**
+1. 用 debugfs 的 `clk/<name>/` 节点把每个必需时钟的 **enable 寄存器偏移/位** 读出来（clk 子系统 debugfs 通常有 `reg`、`parent`、`rate`）
+2. 按这份清单在 shim 里实现 GCC 侧使能（disp/ufs 各一组），再用二元信道验证"块可读"
+3. UFS 通了之后接 UFSHCI 初始化；显示方向接 disp_cc/DSI
