@@ -687,3 +687,29 @@ Linux `ufshcd` 在 `DME_LINKSTARTUP` 之后还会做一串 UIC 操作，我们�
    （GitHub raw 当时被限流，可改用镜像或本地内核源码）
 2. 用正确属性号重读 gear → 按 ufshcd 顺序 `DME_SET` 协商到 HS 模式
 3. 再试 TUR / READ(10)
+
+## 三十一、2026-10-22：UniPro 协商到 HS-G4 成功（第 14 轮）
+
+**用 Bark 号修正 + 完整协商序列**
+属性号取自 `include/ufs/unipro.h`（kernel.org 原始源，绕开 GitHub 限流）：
+`PA_MAXRXHSGEAR=0x1587`、`PA_TXGEAR=0x1568`、`PA_RXGEAR=0x1583`、
+`PA_TXTERMINATION=0x1569`、`PA_RXTERMINATION=0x1584`、`PA_HSSERIES=0x156A`、
+`PA_PWRMODE=0x1571`（`FAST_MODE=1`）。
+
+`ufs_negotiate()`：`DME_GET(PA_MAXRXHSGEAR)` → `DME_SET(termination/series/txgear/rxgear/pwrmode)`
+→ `DME_GET(PA_RXGEAR)` 回读。
+
+**实测：协商成功，回读 `RXGEAR = 4`（HS-G4 高速档）** ✅
+
+**但**：HS 起来了，LU 仍然一直不 READY（停留 60 s 标记）。
+说明问题在 **SCSI/UPIU 层或设备端 LUN 配置**，不再是链路速率。
+
+**下一步**
+1. 核对命令 UPIU 的字段（`flags`、`LUN`、`task tag`、Expected Data Transfer Length）
+   与 UTRD（`CT/DD/I` 位、`PRDT offset/count`）—— 逐字段对照 ufshcd 的 `ufshcd_compose_upiu`
+2. 用 UIC `DME_GET` 读 **Unit Descriptor**（`bLUEnable`、`bBootLunID`、逻辑块大小）
+   确认 LU 是否已被 ABL 配置为使能；若 `bLUEnable=0`，需要写 Configuration Descriptor
+3. 试 `DME_GET(PA_MAXRXDATALANES)` / `PA_ACTIVERXDATALANES`，确认只用 lane 0 是否合法
+
+**UFS 全链路进度**
+`GCC 上电 ✅ → UFSHCI 初始化 ✅ → UIC DME ✅ → HS-G4 协商 ✅ → LU 就绪 ❌ → SCSI 读写 ⏳`
