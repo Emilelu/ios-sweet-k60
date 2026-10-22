@@ -667,3 +667,23 @@ Linux `ufshcd` 在 `DME_LINKSTARTUP` 之后还会做一串 UIC 操作，我们�
 
 **风险提示**：这条线比上游项目深很多（sweet 的 ABL 把 UFS 留在可用状态），
 预计还要 3–5 轮才能拿到第一次成功的块读。
+
+## 三十、2026-10-22：UIC DME 通路打通（第 13 轮）
+
+**新实现**（`shim/ufs.c`）：
+- `ufs_uic_cmd(op, arg1, arg2, *arg3)` —— 通用 UIC 命令（写 ARG1..3 → 写 UICCMD →
+  等 `IS.UCCS` → 查 `ARG2[23:16]` 结果码 → 读 `ARG3`）
+- `ufs_dme_get(attr, *val)` / `ufs_dme_set(attr, val)`，属性选择子 = `(attr << 16) | gen_sel`
+- opcode：`DME_GET = 0x01`、`DME_SET = 0x02`、`DME_LINKSTARTUP = 0x16`（后者此前已在用）
+
+**实测**：`DME_GET(0x0083)` **成功返回**（没有错误码）→ UIC 命令通道可用 ✅
+但读回的 `PA_MaxRxHSGear = 0`，UFS 3.1 设备理论上应是 4 —— 说明**属性号可能不对**
+（UniPro 的 PA_* 属性编号我记错了；`0x0083` 那组是旧版猜测）。
+
+**下一步**
+1. 从可靠来源确认 UniPro 属性号（`include/ufs/unipro.h`）：
+   `PA_MAXRXHSGEAR` / `PA_RXGEAR` / `PA_TXGEAR` / `PA_TXTERMINATION` /
+   `PA_RXTERMINATION` / `PA_HSSERIES` / `PA_PWRMODE` / `PA_ACTIVETXDATALANES`
+   （GitHub raw 当时被限流，可改用镜像或本地内核源码）
+2. 用正确属性号重读 gear → 按 ufshcd 顺序 `DME_SET` 协商到 HS 模式
+3. 再试 TUR / READ(10)
