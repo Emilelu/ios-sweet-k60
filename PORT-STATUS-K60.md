@@ -428,3 +428,29 @@ DTB 由 ABL 通过 x0 传入，shim 本来就只读那个指针）。
 2. 读 `ufs_phy_gdsc`（GCC 0x87004）的 GDSCR 原始位，判断域状态与是否可软开
 3. 用 GCC 使能 UFS 的 AXI/AHB/ICE 时钟 → 再试 UFSHCI 初始化（Q43 变 PASS 即成功）
 4. 显示方向同理：GCC 的 disp 相关时钟 + RPMh 的 vdd_mm/vdd_mxa
+
+## 二十二、2026-10-22：固件静态分析尝试（abl_a / imagefv_a）
+
+用户的思路：把分区提出来分析，直接看 ABL 对显示/UFS 做了什么。
+
+**提取结果**
+
+| 分区 | 大小 | 结构 |
+|---|---|---|
+| `abl_a` | 8 MB | ELF32 ARM，**实际内容仅前 ~0x3E000**，其余全零；段1 = `0x30000 @ vaddr 0x9fa00000` |
+| `imagefv_a` | 48 MB | ELF32 ARM，头部熵 **7.57 bit/byte**（压缩/加密特征），全文件可读字符串仅 79 条 |
+| `devcfg_a` | 256 KB | 未分析 |
+
+**结论**：ABL 的字符串里**没有任何 splash/display/dsi/panel/ufs/gdsc 痕迹**；
+`imagefv` 同样没有。两者载荷都是高熵（压缩或加密），`strings` 路线走不通。
+
+**后续可选（按性价比）**
+1. 用 Ghidra/radare2 反汇编 `0x9fa00000` 段（ARM32）——工作量大，但能看到 ABL 对
+   `0x1d84000`（UFS）/`0xae00000`（MDSS）的写序列，直接告诉我们它关了什么
+2. 更划算：**运行时探测**（已在做）——用 shim 自己读 GCC/GDSCR/UFS 寄存器，
+   用二元信道问出状态；这比静态逆向快得多
+3. 取 `xbl_a`（SBL，早期 DDR/时钟/供电初始化）看是否也加密；若未加密，可拿到
+   RPMh 供电序列的寄存器写法
+
+**当前主结论不变**：UFS 与显示在 ABL 交接后都断电/断时钟，
+必须先做 GCC 时钟 + RPMh 供电，才谈得上 UFSHCI 初始化或点屏。
