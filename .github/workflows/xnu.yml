@@ -49,7 +49,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: dxb
-          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v3' }}
+          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v4' }}
 
       - name: Fetch build script
         if: steps.bcache.outputs.cache-hit != 'true'
@@ -142,6 +142,15 @@ jobs:
         run: |
           mkdir -p out
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          # The dxb build script short-circuits with "already built" when the
+          # cached tree has the binary, and that path does not install it into
+          # fakeroot, so pick the kernel straight out of the object dir too.
+          for k in dxb/build/xnu.obj/*/kernel.*; do
+            case "$k" in
+              *.dSYM|*.link|*.unstripped) continue ;;
+            esac
+            [ -f "$k" ] && cp "$k" out/ 2>/dev/null || true
+          done
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
 
@@ -150,7 +159,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: dxb
-          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v3' }}
+          key: dxb-${{ env.MACOS_VERSION }}-${{ env.DXB_SHA }}-${{ inputs.cache_gen || 'v4' }}
 
       - uses: actions/upload-artifact@v4
         if: always()
