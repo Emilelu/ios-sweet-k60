@@ -1,0 +1,17 @@
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -182,7 +182,13 @@
+ 	ml_cpu_init_completed();
+ 	__atomic_load_n(&sweet_cpus[topology->boot_cpu->cpu_id], __ATOMIC_ACQUIRE)->cpusRunning();
+ 	IOService::publishResource(gIOAllCPUInitializedKey, kOSBooleanTrue);
+-	ml_set_max_cpus(topology->max_cpu_id + 1);
++	/*
++	 * max_cpus must match the number of cores we actually started: everything
++	 * after this point (kperf_init_early's ml_wait_max_cpus(), vm_set_restrictions,
++	 * ...) waits for that many CPUs to be accounted for, so advertising all
++	 * eight while running one would spin forever.
++	 */
++	ml_set_max_cpus(requested);
+ 	IOLog("SWEET CPU: %u/%u CPUs initialized, SGI1 verified\n",
+ 	    topology->num_cpus, topology->num_cpus);
+ 	thread_terminate(current_thread());
