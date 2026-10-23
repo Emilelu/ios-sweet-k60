@@ -1,14 +1,16 @@
 --- a/bsd/miscfs/mockfs/mockfs_fsnode.c
 +++ b/bsd/miscfs/mockfs/mockfs_fsnode.c
-@@ -34,6 +34,7 @@
+@@ -34,6 +34,9 @@
  #include <sys/mount_internal.h>
  #include <sys/ubc_internal.h>
  #include <sys/vnode_internal.h>
-+#include <arm/pmap/pmap.h>   /* phystokv() */
++
++/* osfmk/arm/pmap/pmap.h, which bsd cannot include directly */
++extern addr64_t phystokv(addr64_t pa);
  #include <vm/vm_protos.h>
  
  #include <libkern/libkern.h>
-@@ -345,8 +346,18 @@
+@@ -345,8 +348,18 @@
  				panic("mockfs_fsvnode failed to get ubc_mem_object for a new vnode");
  			}
  
