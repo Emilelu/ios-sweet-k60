@@ -1,6 +1,6 @@
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -789,14 +789,29 @@
+@@ -789,14 +789,35 @@
  	}
  	const unsigned char *glyph = iso_font + c * 16;
  	uint32_t x0 = FBCON_MARGIN + fbcon_col * 8 * FBCON_SCALE, y0 = fbcon_row * 16 * FBCON_SCALE;
@@ -8,7 +8,7 @@
 +	 * The framebuffer is non-cacheable, so one 4-pixel store costs the same as
 +	 * a 1-pixel store; this is what stops the boot log from stuttering. */
 +	typedef uint32_t vec4 __attribute__((vector_size(16)));
-+	uint32_t rowbuf[8 * FBCON_SCALE];
++	uint32_t rowbuf[8 * FBCON_SCALE] __attribute__((aligned(16)));
 +
  	for (uint32_t gy = 0; gy < 16; gy++) {
 +		for (uint32_t gx = 0; gx < 8; gx++) {
@@ -27,6 +27,12 @@
 -				}
 +			uint32_t i = 0;
 +
++			/* A 16-byte store must not cross an unaligned address: the row
++			 * start depends on the stride and margin, so walk the head with
++			 * plain 4-byte stores first. */
++			for (; i < 8 * FBCON_SCALE && (((uintptr_t)(line + i)) & 15u) != 0; i++) {
++				line[i] = rowbuf[i];
++			}
 +			for (; i + 4 <= 8 * FBCON_SCALE; i += 4) {
 +				*(volatile vec4 *)(line + i) = *(vec4 *)(rowbuf + i);
 +			}
