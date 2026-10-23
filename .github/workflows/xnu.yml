@@ -153,6 +153,9 @@ jobs:
           done
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+          # A kernel-only tarball: the full artifact is ~83 MB and the local
+          # download over this link takes minutes, this one is a few MB.
+          (cd out && tar czf kernel-only.tgz kernel.development.sweet) || true
 
       - name: Save dxb build cache
         if: always() && steps.bcache.outputs.cache-hit != 'true'
