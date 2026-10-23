@@ -77,7 +77,7 @@
  	registerService();
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
-+	if (fPixels != NULL) {
++	if (fPixels != 0) {
 +		sweet_fb_draw_boot_screen((volatile uint8_t *)fPixels, fWidth, fHeight, fRowBytes);
 +		IOLog("SWEET FB: XTOM boot screen drawn\n");
 +	}
