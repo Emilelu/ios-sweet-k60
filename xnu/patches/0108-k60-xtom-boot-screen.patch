@@ -1,6 +1,14 @@
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -90,6 +90,72 @@
+@@ -48,6 +48,7 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
++#include <machine/machine_routines.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
+ 
+@@ -90,6 +91,72 @@
  
  class IOMobileFramebufferUserClient;
  
@@ -73,13 +81,31 @@
  class AppleCLCD : public IOMobileFramebuffer {
  	OSDeclareDefaultStructors(AppleCLCD);
  
-@@ -203,6 +269,10 @@
+@@ -203,6 +270,28 @@
  	registerService();
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
-+	if (fPixels != 0) {
-+		sweet_fb_draw_boot_screen((volatile uint8_t *)fPixels, fWidth, fHeight, fRowBytes);
-+		IOLog("SWEET FB: XTOM boot screen drawn\n");
++	/*
++	 * Off by default: the boot screen paints over the whole panel, which would
++	 * wipe the kernel log that is our only diagnostic while the port is still
++	 * being brought up. Enable with "sweetlogo=1".
++	 */
++	{
++		uint32_t want_logo = 0;
++		PE_parse_boot_argn("sweetlogo", &want_logo, sizeof(want_logo));
++		if (want_logo) {
++			/* Map the panel exactly the way the framebuffer console does, so the
++			 * logo lands the right way up (fPixels is not the same offset). */
++			volatile uint32_t *base = (volatile uint32_t *)ml_io_map_wcomb(
++			    PE_state.video.v_baseAddr,
++			    (vm_size_t)PE_state.video.v_rowBytes * PE_state.video.v_height);
++			if (base != NULL) {
++				sweet_fb_draw_boot_screen((volatile uint8_t *)base,
++				    PE_state.video.v_width, PE_state.video.v_height,
++				    PE_state.video.v_rowBytes);
++				IOLog("SWEET FB: XTOM boot screen drawn\n");
++			}
++		}
 +	}
  	return true;
  }
