@@ -4,7 +4,7 @@
  #include <IOKit/IOTimerEventSource.h>
  #include <IOKit/system.h>
  #include <pexpert/pexpert.h>
-+extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys, vm_size_t size);
++extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys, vm_size_t size);
  #include <kern/clock.h>
  #include <sys/proc.h>
  
