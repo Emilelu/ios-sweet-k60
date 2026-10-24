@@ -1,21 +1,8 @@
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -141,6 +141,14 @@
- 		requested = topology->num_cpus;
- 	}
- 
-+	/*
-+	 * Publish the real CPU count *before* waiting on anything: the boot thread
-+	 * runs ml_wait_max_cpus() (via kperf_init_early) while we are still
-+	 * registering CPU nubs, and if max_cpus still says eight while only one core
-+	 * is usable, that wait never returns.
-+	 */
-+	ml_set_max_cpus(requested);
-+
- 	uint64_t deadline;
  	nanoseconds_to_deadline(10 * NSEC_PER_SEC, &deadline);
  	while (__atomic_load_n(&sweet_cpus_registered, __ATOMIC_ACQUIRE) < requested) {
-@@ -182,7 +190,7 @@
+@@ -182,7 +182,7 @@
  	ml_cpu_init_completed();
  	__atomic_load_n(&sweet_cpus[topology->boot_cpu->cpu_id], __ATOMIC_ACQUIRE)->cpusRunning();
  	IOService::publishResource(gIOAllCPUInitializedKey, kOSBooleanTrue);
