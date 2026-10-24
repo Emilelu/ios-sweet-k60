@@ -1,0 +1,17 @@
+--- a/osfmk/kperf/kperf.c
++++ b/osfmk/kperf/kperf.c
+@@ -77,10 +77,11 @@
+ kperf_init_early(void)
+ {
+ 	/*
+-	 * kperf allocates based on the number of CPUs and requires them to all be
+-	 * accounted for.
++	 * K60: only the CPUs asked for with cpus= are started, so waiting for
++	 * machine_info.max_cpus cores here blocks the boot thread forever (this is
++	 * the wait that used to stop the kernel right after the framebuffer driver).
+ 	 */
+-	ml_wait_max_cpus();
++	(void)0;
+ 
+ 	boolean_t found_kperf = FALSE;
+ 	char kperf_config_str[64];
