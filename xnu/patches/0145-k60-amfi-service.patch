@@ -25,26 +25,87 @@
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 --- /dev/null
 +++ b/bsd/kern/sweet_amfi_service.cpp
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,138 @@
 +/*
 + * SWEET: launchd_cache_loader (libamfi) looks AMFI up with
 + *
 + *   IOServiceGetMatchingService(kIOMasterPortDefault,
 + *                               IOServiceMatching("AppleMobileFileIntegrity"))
 + *
-+ * IOServiceMatching matches the service's CLASS name, not its instance name, so
-+ * the class itself has to be called AppleMobileFileIntegrity. The earlier
-+ * version only called setName(), which is why launchd_cache_loader still
-+ * reported "Unable to find AMFI" and launchd panicked the system.
++ * and then opens it with IOServiceOpen(type 0). IOServiceMatching matches the
++ * service's CLASS name, so the class has to be called
++ * AppleMobileFileIntegrity, and the open needs an IOUserClient - without one
++ * launchd_cache_loader aborts with "Unable to connect to AMFI" and launchd
++ * panics the system.
++ *
++ * The client accepts every external method and reports success: our code signing
++ * verdict is already decided by the MAC policy in sweet_amfi.c and by
++ * amfi_get_out_of_my_way, so libamfi's calls are advisory here.
 + */
 +#include <IOKit/IOService.h>
 +#include <IOKit/IOLib.h>
 +#include <IOKit/IOUserClient.h>
 +
++class AppleMobileFileIntegrity;
++
++class AppleMobileFileIntegrityClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleMobileFileIntegrityClient)
++public:
++	static IOUserClient *withTask(task_t owningTask, void *securityID, UInt32 type);
++	IOReturn clientClose() APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleMobileFileIntegrityClient, IOUserClient)
++
++IOUserClient *
++AppleMobileFileIntegrityClient::withTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	AppleMobileFileIntegrityClient *me = new AppleMobileFileIntegrityClient;
++
++	if (me == nullptr) {
++		return nullptr;
++	}
++	if (!me->initWithTask(owningTask, securityID, type)) {
++		me->release();
++		return nullptr;
++	}
++	return me;
++}
++
++IOReturn
++AppleMobileFileIntegrityClient::clientClose()
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleMobileFileIntegrityClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch,
++    OSObject *target, void *reference)
++{
++	(void)dispatch;
++	(void)target;
++	(void)reference;
++	/* Answer every query with "allowed" and a zero scalar result. */
++	if (args != nullptr && args->scalarOutputCount > 0 && args->scalarOutput != nullptr) {
++		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++			args->scalarOutput[i] = 0;
++		}
++	}
++	IOLog_once("SWEET AMFI: user client selector %u accepted\n", selector);
++	return kIOReturnSuccess;
++}
++
 +class AppleMobileFileIntegrity : public IOService {
 +	OSDeclareDefaultStructors(AppleMobileFileIntegrity)
 +public:
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    IOUserClient **handler) APPLE_KEXT_OVERRIDE;
 +};
 +
 +OSDefineMetaClassAndStructors(AppleMobileFileIntegrity, IOService)
@@ -55,11 +116,30 @@
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}
-+	/* Publish under the name libamfi also matches on. */
 +	setProperty("IOClass", "AppleMobileFileIntegrity");
 +	registerService();
-+	IOLog("SWEET AMFI: AppleMobileFileIntegrity published (class match)\n");
++	IOLog("SWEET AMFI: AppleMobileFileIntegrity published (class match, user client ready)\n");
 +	return true;
++}
++
++IOReturn
++AppleMobileFileIntegrity::newUserClient(task_t owningTask, void *securityID,
++    UInt32 type, IOUserClient **handler)
++{
++	AppleMobileFileIntegrityClient *client =
++	    OSDynamicCast(AppleMobileFileIntegrityClient,
++	    AppleMobileFileIntegrityClient::withTask(owningTask, securityID, type));
++
++	if (client == nullptr) {
++		return kIOReturnNoMemory;
++	}
++	if (!client->attach(this) || !client->start(this)) {
++		client->detach(this);
++		client->release();
++		return kIOReturnError;
++	}
++	*handler = client;
++	return kIOReturnSuccess;
 +}
 +
 +extern "C" void
