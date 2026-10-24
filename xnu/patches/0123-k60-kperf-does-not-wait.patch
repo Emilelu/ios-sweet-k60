@@ -1,14 +1,3 @@
---- a/iokit/Kernel/arm/SweetCPU.cpp
-+++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -188,7 +188,7 @@
- 	 * ...) waits for that many CPUs to be accounted for, so advertising all
- 	 * eight while running one would spin forever.
- 	 */
--	ml_set_max_cpus(topology->max_cpu_id + 1);
-+	ml_set_max_cpus(requested);
- 	IOLog("SWEET CPU: %u/%u CPUs initialized, SGI1 verified\n",
- 	    topology->num_cpus, topology->num_cpus);
- 	thread_terminate(current_thread());
 --- a/osfmk/kperf/kperf.c
 +++ b/osfmk/kperf/kperf.c
 @@ -77,10 +77,11 @@
