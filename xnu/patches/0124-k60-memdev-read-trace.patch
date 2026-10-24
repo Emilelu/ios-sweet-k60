@@ -1,6 +1,14 @@
 --- a/bsd/dev/memdev.c
 +++ b/bsd/dev/memdev.c
-@@ -187,6 +187,8 @@
+@@ -78,6 +78,7 @@
+ #include <sys/param.h>
+ #include <sys/kernel.h>
+ #include <sys/mount.h>
++#include <pexpert/pexpert.h>
+ #include <sys/namei.h>
+ #include <sys/proc.h>
+ #include <sys/buf.h>
+@@ -187,6 +188,8 @@
  int mdevCMajor = -1;
  
  static int      mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p, int is_char);
@@ -9,7 +17,7 @@
  dev_t           mdevadd(int devid, uint64_t base, unsigned int size, int phys);
  dev_t           mdevlookup(int devid);
  void            mdevremoveall(void);
-@@ -196,6 +198,8 @@
+@@ -196,6 +199,8 @@
  mdevclose(__unused dev_t dev, __unused int flags,
      __unused int devtype, __unused struct proc *p)
  {
@@ -18,7 +26,7 @@
  	return 0;
  }
  
-@@ -316,6 +320,15 @@
+@@ -316,6 +321,15 @@
  
  	fvaddr = (mdev[devid].mdBase << 12) + blkoff;           /* Point to offset into ram disk */
  
@@ -34,3 +42,11 @@
  	if (buf_flags(bp) & B_READ) {                                   /* Is this a read? */
  		if (!(mdev[devid].mdFlags & mdPhys)) {                   /* Physical mapped disk? */
  			bcopy((void *)((uintptr_t)fvaddr),
+@@ -492,7 +506,6 @@
+ 	return mdev[devid].mdSecsize;
+ }
+ 
+-#include <pexpert/pexpert.h>
+ 
+ void
+ mdevinit(__unused int the_cnt)
