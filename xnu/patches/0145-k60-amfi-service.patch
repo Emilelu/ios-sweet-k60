@@ -25,42 +25,47 @@
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 --- /dev/null
 +++ b/bsd/kern/sweet_amfi_service.cpp
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,58 @@
 +/*
-+ * SWEET: launchd_cache_loader (and libamfi) look for an IORegistry service named
-+ * "AppleMobileFileIntegrity". The built-in AMFI here is only a MAC policy, so
-+ * that lookup failed and launchd_cache_loader aborted with "Unable to find
-+ * AMFI", which panicked the system. Publish a minimal service so the name
-+ * resolves; the policy above is what actually decides anything.
++ * SWEET: launchd_cache_loader (libamfi) looks AMFI up with
++ *
++ *   IOServiceGetMatchingService(kIOMasterPortDefault,
++ *                               IOServiceMatching("AppleMobileFileIntegrity"))
++ *
++ * IOServiceMatching matches the service's CLASS name, not its instance name, so
++ * the class itself has to be called AppleMobileFileIntegrity. The earlier
++ * version only called setName(), which is why launchd_cache_loader still
++ * reported "Unable to find AMFI" and launchd panicked the system.
 + */
 +#include <IOKit/IOService.h>
 +#include <IOKit/IOLib.h>
++#include <IOKit/IOUserClient.h>
 +
-+extern "C" void sweet_amfi_service_publish(void);
-+
-+class SweetAMFIService : public IOService {
-+	OSDeclareDefaultStructors(SweetAMFIService)
++class AppleMobileFileIntegrity : public IOService {
++	OSDeclareDefaultStructors(AppleMobileFileIntegrity)
 +public:
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(SweetAMFIService, IOService)
++OSDefineMetaClassAndStructors(AppleMobileFileIntegrity, IOService)
 +
 +bool
-+SweetAMFIService::start(IOService *provider)
++AppleMobileFileIntegrity::start(IOService *provider)
 +{
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}
++	/* Publish under the name libamfi also matches on. */
++	setProperty("IOClass", "AppleMobileFileIntegrity");
 +	registerService();
-+	IOLog("SWEET AMFI: AppleMobileFileIntegrity published\n");
++	IOLog("SWEET AMFI: AppleMobileFileIntegrity published (class match)\n");
 +	return true;
 +}
 +
 +extern "C" void
 +sweet_amfi_service_publish(void)
 +{
-+	SweetAMFIService *svc = new SweetAMFIService;
++	AppleMobileFileIntegrity *svc = new AppleMobileFileIntegrity;
 +
 +	if (svc == nullptr) {
 +		return;
@@ -71,8 +76,11 @@
 +	}
 +	svc->setName("AppleMobileFileIntegrity");
 +	if (!svc->attach(IOService::getResourceService())) {
++		IOLog("SWEET AMFI: attach failed\n");
 +		svc->release();
 +		return;
 +	}
-+	svc->start(IOService::getResourceService());
++	if (!svc->start(IOService::getResourceService())) {
++		IOLog("SWEET AMFI: start failed\n");
++	}
 +}
