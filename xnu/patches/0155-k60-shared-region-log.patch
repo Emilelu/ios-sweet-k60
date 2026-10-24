@@ -1,0 +1,18 @@
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -2288,6 +2288,15 @@
+ 	sr_pmap_nesting_size = (vm_map_size_t)shared_region->sr_pmap_nesting_size;
+ 	vmk_flags = VM_MAP_KERNEL_FLAGS_FIXED();
+ 
++	/*
++	 * SWEET: userland runs without the dyld shared cache because the shared
++	 * region ends up empty (sr_first_mapping == -1). Print the geometry the map
++	 * is built from; that is enough to see whether the base/size are sane.
++	 */
++	printf("SWEET SR: map_and_slide base=%#llx size=%#llx handle=%p nesting=%#llx+%#llx\n",
++	    (uint64_t)sr_address, (uint64_t)sr_size, (void *)sr_handle,
++	    (uint64_t)sr_pmap_nesting_start, (uint64_t)sr_pmap_nesting_size);
++
+ 	cur_prot = VM_PROT_READ;
+ 	if (VM_MAP_POLICY_WRITABLE_SHARED_REGION(map)) {
+ 		/*
