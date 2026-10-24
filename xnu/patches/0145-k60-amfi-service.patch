@@ -53,15 +53,15 @@
 + * caller in the AMFI path passes an object to export, so returning a null port
 + * is enough to link and run.
 + */
-+ipc_port *
-+IOUserClient::exportObjectToClient(task_t task, OSObject *object, ipc_port **portp)
++IOReturn
++IOUserClient::exportObjectToClient(task_t task, LIBKERN_CONSUMED OSObject *object, io_object_t *clientObj)
 +{
 +	(void)task;
 +	(void)object;
-+	if (portp != nullptr) {
-+		*portp = IPC_PORT_NULL;
++	if (clientObj != nullptr) {
++		*clientObj = MACH_PORT_NULL;
 +	}
-+	return IPC_PORT_NULL;
++	return kIOReturnUnsupported;
 +}
 +
 +class AppleMobileFileIntegrity;
