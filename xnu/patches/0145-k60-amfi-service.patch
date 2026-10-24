@@ -25,7 +25,7 @@
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 --- /dev/null
 +++ b/bsd/kern/sweet_amfi_service.cpp
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,50 @@
 +/*
 + * SWEET: launchd_cache_loader (and libamfi) look for an IORegistry service named
 + * "AppleMobileFileIntegrity". The built-in AMFI here is only a MAC policy, so
@@ -35,6 +35,8 @@
 + */
 +#include <IOKit/IOService.h>
 +#include <IOKit/IOLib.h>
++
++extern "C" void sweet_amfi_service_publish(void);
 +
 +class SweetAMFIService : public IOService {
 +	OSDeclareDefaultStructors(SweetAMFIService)
@@ -55,7 +57,7 @@
 +	return true;
 +}
 +
-+void
++extern "C" void
 +sweet_amfi_service_publish(void)
 +{
 +	SweetAMFIService *svc = new SweetAMFIService;
