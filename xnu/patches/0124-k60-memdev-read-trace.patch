@@ -1,0 +1,36 @@
+--- a/bsd/dev/memdev.c
++++ b/bsd/dev/memdev.c
+@@ -187,6 +187,8 @@
+ int mdevCMajor = -1;
+ 
+ static int      mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p, int is_char);
++int sweet_mdev_trace = 0;   /* boot-arg sweetmdtrace=1 */
++
+ dev_t           mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+ dev_t           mdevlookup(int devid);
+ void            mdevremoveall(void);
+@@ -196,6 +198,8 @@
+ mdevclose(__unused dev_t dev, __unused int flags,
+     __unused int devtype, __unused struct proc *p)
+ {
++	PE_parse_boot_argn("sweetmdtrace", &sweet_mdev_trace, sizeof(sweet_mdev_trace));
++
+ 	return 0;
+ }
+ 
+@@ -316,6 +320,15 @@
+ 
+ 	fvaddr = (mdev[devid].mdBase << 12) + blkoff;           /* Point to offset into ram disk */
+ 
++	/* K60 bring-up: the ramdisk read is where the boot currently faults, so
++	 * show exactly what is being copied and where from. */
++	if (sweet_mdev_trace) {
++		printf("SWEET MD: dev=%d base=%#llx blkoff=%#llx fvaddr=%#llx count=%u phys=%d\n",
++		    devid, (unsigned long long)mdev[devid].mdBase, (unsigned long long)blkoff,
++		    (unsigned long long)fvaddr, (unsigned)buf_count(bp),
++		    (mdev[devid].mdFlags & mdPhys) ? 1 : 0);
++	}
++
+ 	if (buf_flags(bp) & B_READ) {                                   /* Is this a read? */
+ 		if (!(mdev[devid].mdFlags & mdPhys)) {                   /* Physical mapped disk? */
+ 			bcopy((void *)((uintptr_t)fvaddr),
