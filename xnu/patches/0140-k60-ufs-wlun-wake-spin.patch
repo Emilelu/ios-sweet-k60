@@ -18,6 +18,15 @@
  	ucd->cmd[3] = ++su.tag;
  	ucd->cmd[12] = (uint8_t)(len >> 24);
  	ucd->cmd[13] = (uint8_t)(len >> 16);
+@@ -266,7 +266,7 @@
+ 
+ 			bzero(sense, 18);
+ 			su.sense_busy = true;   /* do not recurse into this path */
+-			serr = ufs_scsi(sense_cdb, sizeof(sense_cdb), 18, false);
++			serr = ufs_scsi_lun(lun, sense_cdb, sizeof(sense_cdb), 18, false);
+ 			su.sense_busy = false;
+ 			/* REQUEST SENSE data lands in the bounce buffer, not on our stack. */
+ 			printf("SWEET UFS: sense rc %d: %02x %02x %02x %02x %02x %02x %02x %02x"
 @@ -279,11 +279,30 @@
  	return 0;
  }
