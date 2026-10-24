@@ -1,0 +1,55 @@
+--- a/bsd/dev/sweet_rpmh.c
++++ b/bsd/dev/sweet_rpmh.c
+@@ -328,8 +328,15 @@
+ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
+ {
+ 	/* Board-specific helper: do not apply PMIC5-LDO policy to arbitrary resources. */
+-	if (!res || strcmp(res, "ldoc11") || mv < 2950 || mv > 3400) {
+-		printf("SWEET RPMH: expected ldoc11 and 2950..3400 mV\n");
++	/*
++	 * ldoc11 powers the touch panel (3.0-3.4 V). The eUSB2 PHY on mondrian needs
++	 * ldob5 (vdd, 879 mV) and ldoc10 (vdda12, 1.2 V) - the device tree names
++	 * them vdd-supply / vdda12-supply of hsphy@88e3000.
++	 */
++	if (!res ||
++	    (strcmp(res, "ldoc11") && strcmp(res, "ldob5") && strcmp(res, "ldoc10")) ||
++	    mv < 800 || mv > 3400) {
++		printf("SWEET RPMH: unsupported resource/voltage\n");
+ 		return EINVAL;
+ 	}
+ 	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -62,7 +62,11 @@
+ 
+ #define DWC3_PA                 0x0a600000
+ #define DWC3_SIZE               0x0000d000
+-#define QUSB2_PA                0x088e2000
++/*
++ * mondrian: the eUSB2 PHY is hsphy@88e3000 (sweet's QUSB2 is at 0x88e2000, one
++ * page lower). Reading the wrong page is what made this probe data-abort.
++ */
++#define QUSB2_PA                0x088e3000
+ #define QUSB2_SIZE              0x00000400
+ 
+ static uint32_t
+@@ -85,6 +89,19 @@
+ 	if (!enabled) {
+ 		return;
+ 	}
++	/*
++	 * Power the PHY first. On mondrian the eUSB2 PHY's analogue rails are RPMh
++	 * regulators (ldob5 = vdd 879 mV, ldoc10 = vdda12 1.2 V). Without them the
++	 * PHY registers read back as zeros and no USB session is ever seen.
++	 */
++	{
++		extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
++		int e1 = sweet_rpmh_vreg_enable("ldob5", 879);
++		int e2 = sweet_rpmh_vreg_enable("ldoc10", 1200);
++
++		printf("SWEET USB: phy rails ldob5 rc=%d ldoc10 rc=%d\n", e1, e2);
++	}
++
+ 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+ 	if (gcc == 0) {
+ 		printf("SWEET USB: GCC map failed\n");
