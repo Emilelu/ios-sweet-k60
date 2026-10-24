@@ -96,7 +96,7 @@
 +			args->scalarOutput[i] = 0;
 +		}
 +	}
-+	IOLog_once("SWEET AMFI: user client selector %u accepted\n", selector);
++	if (selector != 0) { IOLog("SWEET AMFI: user client selector %u accepted\n", selector); }
 +	return kIOReturnSuccess;
 +}
 +
