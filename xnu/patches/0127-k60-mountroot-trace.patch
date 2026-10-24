@@ -1,0 +1,27 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1270,11 +1270,24 @@
+ 		}
+ #endif
+ 
++		{
++			/* K60 bring-up: which filesystem is being tried right now, in the
++			 * fixed (non-scrolling) panel area, so a crash inside it is visible. */
++			extern void sweet_fbcon_trace(int, const char *, uint64_t, uint64_t, uint64_t);
++
++			sweet_fbcon_trace(1, "FS try", (uint64_t)(uintptr_t)vfsp->vfc_name,
++			    (uint64_t)vfsp->vfc_typenum, 0);
++		}
+ 		if (vfsp->vfc_mountroot) {
+ 			error = (*vfsp->vfc_mountroot)(mp, rootvp, ctx);
+ 		} else {
+ 			error = VFS_MOUNT(mp, rootvp, 0, ctx);
+ 		}
++		{
++			extern void sweet_fbcon_trace(int, const char *, uint64_t, uint64_t, uint64_t);
++
++			sweet_fbcon_trace(2, "FS done", (uint64_t)error, 0, 0);
++		}
+ 
+ 		if (!error) {
+ 			if (bdevvp_rootvp != rootvp) {
