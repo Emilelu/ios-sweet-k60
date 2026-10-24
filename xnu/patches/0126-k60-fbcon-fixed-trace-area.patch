@@ -1,6 +1,45 @@
 --- a/pexpert/arm/pe_serial.c
 +++ b/pexpert/arm/pe_serial.c
-@@ -822,6 +822,70 @@
+@@ -717,6 +717,8 @@
+  * rounded corners that physically hide text drawn at the very edge. */
+ #define FBCON_SCALE     2
+ #define FBCON_MARGIN    48
++/* Rows kept for sweet_fbcon_trace(); the scrolling log starts below them. */
++#define FBCON_RESERVED  3
+ #define FBCON_FG        0xffffffffu
+ #define FBCON_BG        0xff000000u
+ 
+@@ -735,7 +737,9 @@
+ 
+ 	vec4 bg = { FBCON_BG, FBCON_BG, FBCON_BG, FBCON_BG };
+ 
+-	for (uint32_t y = row * 16 * FBCON_SCALE; y < (row + 1) * 16 * FBCON_SCALE; y++) {
++	uint32_t first = (row + FBCON_RESERVED) * 16 * FBCON_SCALE;
++
++	for (uint32_t y = first; y < first + 16 * FBCON_SCALE; y++) {
+ 		volatile uint32_t *line = fbcon_base + y * (fbcon_stride / 4);
+ 		uint32_t x = 0;
+ 
+@@ -760,7 +764,7 @@
+ fbcon_init(void)
+ {
+ 	fbcon_cols = (fbcon_width - 2 * FBCON_MARGIN) / (8 * FBCON_SCALE);
+-	fbcon_rows = fbcon_height / (16 * FBCON_SCALE);
++	fbcon_rows = fbcon_height / (16 * FBCON_SCALE) - FBCON_RESERVED;
+ 	fbcon_col = fbcon_row = 0;
+ 	for (uint32_t r = 0; r < fbcon_rows; r++) {
+ 		fbcon_clear_row(r);
+@@ -788,7 +792,8 @@
+ 		fbcon_newline();
+ 	}
+ 	const unsigned char *glyph = iso_font + c * 16;
+-	uint32_t x0 = FBCON_MARGIN + fbcon_col * 8 * FBCON_SCALE, y0 = fbcon_row * 16 * FBCON_SCALE;
++	uint32_t x0 = FBCON_MARGIN + fbcon_col * 8 * FBCON_SCALE;
++	uint32_t y0 = (fbcon_row + FBCON_RESERVED) * 16 * FBCON_SCALE;
+ 	/*
+ 	 * Plain 4-byte stores: an earlier attempt to batch this with 16-byte vector
+ 	 * stores faulted on a non-cacheable, not necessarily aligned framebuffer and
+@@ -822,6 +827,70 @@
  	return 0;
  }
  
