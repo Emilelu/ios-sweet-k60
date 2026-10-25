@@ -15,7 +15,7 @@
  		kern_return_t vmfkr = KERN_SUCCESS;
 --- a/osfmk/kern/exception.c
 +++ b/osfmk/kern/exception.c
-@@ -898,6 +898,43 @@
+@@ -898,6 +898,49 @@
  }
  
  /*
@@ -29,11 +29,17 @@
 +sweet_user_abort_log(uint32_t esr, uint64_t far, uint64_t elr, uint32_t fault_code,
 +    int fault_type, int kr)
 +{
-+	proc_t p = current_proc();
 +	vm_map_t map = current_map();
 +	vm_map_entry_t entry = VM_MAP_ENTRY_NULL;
 +	uint64_t vstart = 0, vend = 0;
 +	int prot = -1;
++	char name[24];
++	int pid;
++	extern int proc_selfpid(void);
++	extern void proc_selfname(char *, int);
++
++	proc_selfname(name, sizeof(name));
++	pid = proc_selfpid();
 +
 +	vm_map_lock_read(map);
 +	if (vm_map_lookup_entry(map, (vm_map_offset_t)far, &entry) &&
@@ -45,8 +51,8 @@
 +	vm_map_unlock_read(map);
 +
 +	printf("ABORT %s[%d] esr 0x%x far 0x%llx elr 0x%llx fc 0x%x ft 0x%x kr %d vme 0x%llx-0x%llx prot %d\n",
-+	    p != NULL ? p->p_comm : "?", p != NULL ? proc_getpid(p) : 0,
-+	    esr, far, elr, fault_code, (unsigned)fault_type, kr, vstart, vend, prot);
++	    name, pid, esr, far, elr, fault_code, (unsigned)fault_type, kr,
++	    vstart, vend, prot);
 +
 +	{
 +		extern void sweet_log_flush_now(void);
