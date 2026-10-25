@@ -1,0 +1,67 @@
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2565,6 +2565,19 @@
+  * need to skip those pages.
+  */
+ 
++
++/*
++ * SWEET: the ABL display controller keeps scanning the panel buffer, and our
++ * console draws into it on every printf. If the VM ever hands one of those
++ * physical pages to a process or to a page table, console output overwrites it:
++ * the panel shows coloured stripes and unrelated PTEs, pthreads and heap
++ * blocks are corrupted. Keep the whole panel window out of the page allocator.
++ * 0xb9200000 is the start of the panic log carve-out, so the range is exact.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#define SWEET_PANEL_BASE 0xb8000000ULL
++#define SWEET_PANEL_END  0xb9200000ULL
++#endif
+ static unsigned int avail_page_count = 0;
+ static bool need_ram_ranges_init = true;
+ 
+@@ -2641,6 +2654,15 @@
+ 		initialize_ram_ranges();
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (first_avail >= SWEET_PANEL_BASE && first_avail < SWEET_PANEL_END) {
++		printf("SWEET MEM: panel buffer %#llx-%#llx left out of the VM, %u pages to go\n",
++		    SWEET_PANEL_BASE, SWEET_PANEL_END,
++		    (unsigned int)atop(avail_end - SWEET_PANEL_END));
++		first_avail = SWEET_PANEL_END;
++	}
++	avail_page_count = (unsigned int)atop(avail_end - first_avail);
++#endif
+ 
+ 	if (first_avail != avail_end) {
+ 		*pnum = (ppnum_t)atop(first_avail);
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -2309,12 +2309,21 @@
+ 	 */
+ 	{
+ 		extern void sweet_fbcon_trace(int, const char *, uint64_t, uint64_t, uint64_t);
++		static unsigned int sweet_sr_logged = 0;
+ 
+-		sweet_fbcon_trace(1, "SR base", (uint64_t)sr_address, (uint64_t)sr_size,
+-		    (uint64_t)(uintptr_t)sr_handle);
+-		printf("SWEET SR: base=%#llx size=%#llx handle=%p nesting=%#llx+%#llx\n",
+-		    (uint64_t)sr_address, (uint64_t)sr_size, (void *)sr_handle,
+-		    (uint64_t)sr_pmap_nesting_start, (uint64_t)sr_pmap_nesting_size);
++		/*
++		 * SWEET: this runs for every process, and the console ring is the only
++		 * place a crash can be read back from. A few copies prove the geometry,
++		 * hundreds push the interesting lines out of a 4 MiB ring.
++		 */
++		if (sweet_sr_logged < 8) {
++			sweet_sr_logged++;
++			sweet_fbcon_trace(1, "SR base", (uint64_t)sr_address, (uint64_t)sr_size,
++			    (uint64_t)(uintptr_t)sr_handle);
++			printf("SWEET SR: base=%#llx size=%#llx handle=%p nesting=%#llx+%#llx\n",
++			    (uint64_t)sr_address, (uint64_t)sr_size, (void *)sr_handle,
++			    (uint64_t)sr_pmap_nesting_start, (uint64_t)sr_pmap_nesting_size);
++		}
+ 	}
+ 
+ 	cur_prot = VM_PROT_READ;
