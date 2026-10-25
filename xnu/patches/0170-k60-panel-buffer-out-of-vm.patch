@@ -1,41 +1,48 @@
---- a/osfmk/arm/pmap/pmap.c
-+++ b/osfmk/arm/pmap/pmap.c
-@@ -2565,6 +2565,19 @@
-  * need to skip those pages.
-  */
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -1394,6 +1394,23 @@
+ #endif
  
-+
+ void vm_page_release_startup(vm_page_t mem);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
 +/*
-+ * SWEET: the ABL display controller keeps scanning the panel buffer, and our
-+ * console draws into it on every printf. If the VM ever hands one of those
-+ * physical pages to a process or to a page table, console output overwrites it:
-+ * the panel shows coloured stripes and unrelated PTEs, pthreads and heap
-+ * blocks are corrupted. Keep the whole panel window out of the page allocator.
-+ * 0xb9200000 is the start of the panic log carve-out, so the range is exact.
++ * SWEET: the ABL display controller keeps scanning the panel buffer at
++ * 0xb8000000-0xb9200000 and our console draws into it on every printf. Any of
++ * those pages that reaches a user map or a page table is overwritten by console
++ * text, which shows up as a striped panel and as random PTE/pthread/heap
++ * corruption. The pages must stay in the vm_page array (packing derives the
++ * physical page from the array index, so a hole in the middle trips the
++ * assertion in vm_page_init), they simply never go onto a free list.
 + */
-+#if defined(ARM64_BOARD_CONFIG_SWEET)
-+#define SWEET_PANEL_BASE 0xb8000000ULL
-+#define SWEET_PANEL_END  0xb9200000ULL
++#define SWEET_PANEL_PAGE(mem)                                           \
++	(VM_PAGE_GET_PHYS_PAGE(mem) >= atop(0xb8000000ULL) &&           \
++	 VM_PAGE_GET_PHYS_PAGE(mem) < atop(0xb9200000ULL))
++#else
++#define SWEET_PANEL_PAGE(mem) FALSE
 +#endif
- static unsigned int avail_page_count = 0;
- static bool need_ram_ranges_init = true;
- 
-@@ -2641,6 +2654,15 @@
- 		initialize_ram_ranges();
++
+ void
+ pmap_startup(
+ 	vm_offset_t     *startp,
+@@ -1570,7 +1587,7 @@
+ 		if (fill) {
+ 			fillPage(phys_page, fillval);
+ 		}
+-		if (vm_himemory_mode) {
++		if (vm_himemory_mode && !SWEET_PANEL_PAGE(&vm_pages[i])) {
+ 			vm_page_release_startup(&vm_pages[i]);
+ 		}
  	}
+@@ -1578,7 +1595,8 @@
  
-+#if defined(ARM64_BOARD_CONFIG_SWEET)
-+	if (first_avail >= SWEET_PANEL_BASE && first_avail < SWEET_PANEL_END) {
-+		printf("SWEET MEM: panel buffer %#llx-%#llx left out of the VM, %u pages to go\n",
-+		    SWEET_PANEL_BASE, SWEET_PANEL_END,
-+		    (unsigned int)atop(avail_end - SWEET_PANEL_END));
-+		first_avail = SWEET_PANEL_END;
-+	}
-+	avail_page_count = (unsigned int)atop(avail_end - first_avail);
-+#endif
- 
- 	if (first_avail != avail_end) {
- 		*pnum = (ppnum_t)atop(first_avail);
+ 	if (!vm_himemory_mode) {
+ 		do {
+-			if (!VMP_ERROR_GET(&vm_pages[--i])) {               /* skip retired pages */
++			if (!VMP_ERROR_GET(&vm_pages[--i]) &&               /* skip retired pages */
++			    !SWEET_PANEL_PAGE(&vm_pages[i])) {
+ 				vm_page_release_startup(&vm_pages[i]);
+ 			}
+ 		} while (i != 0);
 --- a/osfmk/vm/vm_shared_region.c
 +++ b/osfmk/vm/vm_shared_region.c
 @@ -2309,12 +2309,21 @@
