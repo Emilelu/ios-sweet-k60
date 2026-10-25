@@ -1,0 +1,36 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -326,24 +326,27 @@
+ static int
+ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
+ {
+-	if (priv == PRIV_WORK_INTERVAL) {
+-		return 0;
+-	}
++	/*
++	 * SWEET runs without a sandbox, so grant every privilege: returning EPERM
++	 * only refuses the extra grant, which leaves callers such as logd failing
++	 * kauth checks and then crashing on the error path. Log the first request of
++	 * each privilege per process for the record, then grant.
++	 */
+ 	char name[20];
+ 	proc_selfname(name, sizeof(name));
+ 	for (int i = 0; i < sweet_priv_logged_count; i++) {
+ 		if (sweet_priv_logged[i].priv == priv &&
+ 		    strncmp(sweet_priv_logged[i].name, name, sizeof(name)) == 0) {
+-			return EPERM;
++			return 0;
+ 		}
+ 	}
+ 	if (sweet_priv_logged_count < SWEET_PRIV_LOG_MAX) {
+ 		sweet_priv_logged[sweet_priv_logged_count].priv = priv;
+ 		strlcpy(sweet_priv_logged[sweet_priv_logged_count].name, name, sizeof(name));
+ 		sweet_priv_logged_count++;
+-		printf("SWEET Sandbox: %s privilege %d denied\n", name, priv);
++		printf("SWEET Sandbox: %s privilege %d granted\n", name, priv);
+ 	}
+-	return EPERM;
++	return 0;
+ }
+ 
+ static const struct mac_policy_ops sweet_sandbox_mac_ops = {
