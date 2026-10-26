@@ -165,6 +165,27 @@ static void install_hooks()
 		m->w[0x16070 / 4] = 0x100;             /* CM3_FW_INIT_RESULT */
 		m->w[0x16600 / 4] = 1;                 /* HFI_CTRL_STATUS */
 	}
+	/* smmu：SMMU 活着、全局不旁路、SID 5 走翻译到 bank 3，bank 里 TTBR0 已指向
+	 * 一张表（ASID 1）。用来跑 0189a 的只读探针，判读路径与真机一致。 */
+	if (g_scenario == "smmu" || g_scenario == "smmubypass") {
+		Block *m = blk(0x3da0000);
+		unsigned pages = 32, bank = 3;
+		uint32_t cb = (pages + bank) * 0x1000;
+		if (g_scenario == "smmubypass") {
+			m->w[0x00 / 4] = 1;             /* sCR0.CLIENTPD */
+		}
+		m->w[0x20 / 4] = 0x18;              /* sIDR0: 24 个 SMR, EXIDS=0 */
+		m->w[0x24 / 4] = 0x15 | (4u << 28); /* sIDR1: 21 个 CB, pages=1<<5=32 */
+		m->w[0x28 / 4] = 0x2b;              /* sIDR2 */
+		m->w[0x800 / 4] = 0x80000000u | 5u;  /* SMR0: valid, sid 5 */
+		m->w[0xc00 / 4] = (0u << 16) | bank; /* S2CR0: translation, bank 3 */
+		m->w[(0x1000 + 4 * bank) / 4] = 0x1f << 16;
+		m->w[(0x1800 + 4 * bank) / 4] = 1;
+		m->w[cb / 4] = 1;                   /* SCTLR.M */
+		m->w[(cb + 0x20) / 4] = 0x90000000; /* TTBR0 low */
+		m->w[(cb + 0x24) / 4] = 1;          /* TTBR0 high: ASID 1 */
+	}
+
 	/* gmuboot：CM3 被握着复位，写 SYSRESET=0 之后固件才报 FW_INIT=0x100，
 	 * 用来跑通 M3 的完整路径（上传 + 回读 + 配置 + 放复位 + 轮询）。 */
 	if (g_scenario == "gmuboot" || g_scenario == "gmureadback" ||
@@ -230,6 +251,8 @@ int main(int argc, char **argv)
 		{ SWEET_GPUCC_PA,  SWEET_GPUCC_SIZE,  "gpucc"  },
 		{ SWEET_GMU_AO_PA, SWEET_GMU_AO_SIZE, "ao"     },
 		{ SWEET_GCC_PA,    SWEET_GCC_SIZE,    "gcc"    },
+		{ 0x3da0000ULL,    0x40000,            "smmu"   },
+		{ 0x3de6000ULL,    0x20,               "tcu"    },
 	};
 	for (auto &b : blocks) {
 		Block nb; nb.pa = b.pa; nb.size = b.size; nb.name = b.name;
