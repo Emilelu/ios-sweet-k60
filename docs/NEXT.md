@@ -1,5 +1,20 @@
 # 回来后从这里继续
 
+> **2026-10-26 17:00 更正（先读这条）**：§17.4 的"内存门禁失败"是**读错行**。
+> `/tmp/verify.txt` 前 13,531 字节是上一次启动的 console 被本次启动 `sweet_log_dump()`
+> 重打进来的（与 `/tmp/k60-adreno1.txt` 前 176 行逐字节相同，连 `3626 microsec`
+> 都一样），本次启动自己的 `vm_page_bootstrap` 根本没进环。那份 55885 属于更早一次
+> base=0x80000000 的旧 ADT 启动（sim 逐页复现）。
+> → **本轮门禁没测到，不是没通过；"boot_args/ADT 交付链断了"这个判断撤回。**
+> 下一步不是查链路，而是把页数打印挪到 dump 之后（`sweet_log_dump()` 之后、
+> `SWEET LOG: thread running` 一带）。证据与改判见 `GPU-PORT-NOTES.md` §18。
+> 规划见 `PLAN-BOOTARGS-CHAIN.md`。
+
+> **2026-10-26 16:50 上机轮结果（先读这段）**：内存门禁 **失败**（`vm_page_bootstrap`
+> 55885 页，不是 41272），Adreno **一行输出都没有**，启动仍在 45 s 后被
+> `SWEET TOUCH: gcc probe vote read` 打断。**这一轮对 GPU 无结论，p1/p2 继续禁刷。**
+> 完整证据与下一步见 `GPU-PORT-NOTES.md` §17。
+
 ## 2026-10-26 内存轮（离线，别和 GPU 那轮混）
 
 - **703 MB 不是天花板**，它只是"payload 在 `0xb4000000`、上界卡在 gunyah 前"这个摆法的

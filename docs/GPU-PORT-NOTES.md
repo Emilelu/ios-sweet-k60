@@ -400,3 +400,374 @@ python3 tools/k60-log-summary.py <log>
 
 判据速查：`gpucc[i]` 全 `0xffffffff` = 该块无时钟/NoC 错；`GDSC is owned by firmware`
 = bootloader 已上电（好消息，看 preflight 的 n/7）；`0/7 branches running` = 时钟没起来。
+
+---
+
+## 17. 第一次真机上机（2026-10-26 16:38）：门禁失败，Adreno 一行都没跑出来
+
+> 结论先行：**镜像里确实有 Adreno（0183），但这一轮没有验证到它。** 启动在
+> `SWEET TOUCH: gcc probe vote read` 处被打断，日志里 `SWEET ADRENO` = 0 条，
+> 内存门禁（41272 页）也没过（实际 55885 / 2611）。**本轮对 GPU 作废**，
+> 先修 boot_args/ADT 的交付，再谈 GPU；p1/p2 继续禁刷。
+
+### 17.1 镜像核对（离线可复跑）
+
+`artifacts/xnu-adreno-m1m3-verify.img`（16,896,000 B，16:19 由备弹构建）：
+
+```bash
+grep -ac "SWEET ADRENO" artifacts/xnu-adreno-m1m3-verify.img     # 50
+grep -ac "SweetAdreno"  artifacts/xnu-adreno-m1m3-verify.img     # 27
+# payload @0x30000: phys_base=0xb4000000 mem_size=0x2bf00000(703 MiB)
+#                   adt_off=0xfe7e40 adt_size=0x2774
+# ADT: dram-base=0xb4000000 dram-size=0x2bf00000
+# cmdline 末尾: sweetadreno=1 sweetadreno_stage=3 sweetadreno_fwinfo=1
+```
+
+- 内嵌 payload 的 10 个段与 `artifacts/kernel-adreno-0183.sweet` **逐段 sha1 相同**
+  （Mach-O 里的第 11 个 `__CTF` 与 `__LINKEDIT` 共用起始 VA，不是独立 payload 段）。
+- IODeviceTree 匹配表里有 `'IOClass' = SweetAdreno; 'IOProviderClass' = IOResources;
+  'IOMatchCategory' = SweetAdreno`。
+- 仍**不含 0184/0185**（`sweetadreno_fwinfo`、`GMU firmware embedded` 均 0 处），
+  所以 `fwinfo` 这次注定无效。
+
+### 17.2 日志环是哪次启动的（机制，先记住再看数）
+
+- `sweet_log_thread`（0047/0169）每 `ufslogsecs` 秒把 `sweet_log_total` 之前的
+  console **从 ring 偏移 0 线性写盘**，header 的 `seq` 自增；而 `sweet_log_flush_now`
+  （panic 路径，0162/0171）固定写 **`.seq = 1`**。
+- 拉到的两份环头都是 `seq 1`（`total` 128771 / 134545），且内容第一行都是
+  `SWEET-STAGE-40`（kprintf 第一句）→ **环内容就是 panic 那次启动自己的 console**，
+  不是上上次残留。
+- 0171 的 `printf("SWEET LOG: panic flush, total …")` 在 `total` 已经取完之后才打印，
+  **不会**被写进这次 flush 的范围 → 环里没有这行是正常的，不能当"flush 没跑"。
+
+### 17.3 panic 定位（这条是确定的）
+
+```
+pc 0xfffffff0074f2f98 − text base 0xfffffff007004000 = 0x4EEF98
+→ kernel-adreno-0183.sweet: _touch_thread+0x178  (scalers/accel 三颗内核同址同指令)
+   fffffe00074f2f8c: ldr x8, [x19, #2072]    ; 取 st.gcc（touch 的 gcc 映射）
+   fffffe00074f2f94: movk w24, #5, lsl #16   ; w24 = 0x5200c
+   fffffe00074f2f98: ldr w23, [x8, x24]      ; ← 故障读
+```
+
+- `x8` 就是日志里那句 `SWEET TOUCH: gcc map 0xfffffe3019470000`；
+  `+0x5200c` → `far = 0xfffffe30194c200c`，落在 `ml_io_map(gcc, 0x60000)` 窗口内
+  → **不是缺页**。
+- `esr 0x96000010` = 同 EL data abort、WnR=0（读）、DFSC=`0x10` = **同步外部中止**
+  （总线/XPU/电源域拒绝），和 0173 注释里的 "XPU abort" 一致。
+- 目标寄存器是 `TOUCH_GCC_VOTE = 0x5200c`（0060 补丁 245–248 行），即 **GCC+0x15200c**
+  的 GPU_CC GDSC/vote 寄存器。**不是 Adreno 的 ioremap，也不是 0184 的 notch。**
+- 照片上的数字：内核格式串是 `pc: 0x%016llx … far: 0x%016llx`，`far` 只能是 16 位；
+  转写的 `0xfffffff0a3019c200c`（18 位）必然有错位，以上面的指令 + 日志映射为准。
+- 照片里 `GEN1/GEN5/DMR/Metadata/Bits maps/Extra: 0 - 0` = 日志 **44–52 行**的
+  `zone_init: map GEN1` / `metadata` / `metabits` / `extra 0:0 (0B)`，不是异物。
+- `Memory: 1076` = panic 头的 `Memory ID: 0x434`（0x434=1076）；内核里没有
+  `Memory: %d` 这种格式串（只有 `Memory ID: 0x%x`）。
+
+### 17.4 内存门禁：失败（本轮作废的直接原因）
+
+> **⚠ 2026-10-26 17:0x 更正：本节结论作废。** 第 16 行的 `55885` 不是这次启动的
+> 输出，而是**上一次启动**的 console 被本次启动重打进来的（详见 **§18**）。
+> 正确表述是：**本轮没有测到门禁**，而不是"门禁失败"。下面这段保留作反面教材，
+> 但**不要**再据此去查 shim/ADT 的交付链。
+
+`/tmp/verify.txt:16`：
+
+```
+vm_page_bootstrap: 55885 free pages, 2611 wired pages, (up to 0 of which are delayed free)
+```
+
+- 期望 41272（±10），实际 **55885**；且**与旧日志（128771 B）这一行完全相同**。
+- `55885 + 2611 = 58496` 页 = **914 MiB = 0x39200000**，正好是旧 `artifacts/k60.adt`
+  的 `dram-size`；而 verify.img 的 ADT 是 `0x2bf00000`（703 MiB，上限 44992 页）。
+  → 内核看到的 `dram-size` **不是**镜像里那份。
+- 0172 的 cap 代码在 0183 里**确实存在**：
+  - `0xfffffe000748b478 ldr x9, [x1, #728]`（`args->memSizeActual`）
+  - `0x748b494 b.hs`；`0x748b4a4` 引用 `"SWEET MEM: physmap %llu MiB, VM manages %llu MiB (dram-size)"`
+  - 但**两份日志都没有这行** → 分支没走，`memSizeActual` 读成了 0。
+- `boot_args` 是被拷进内核的 `_const_boot_args` 再用的，拷贝长度 **736**
+  （`0xfffffe0007ae226c mov w2, #736` → `memmove`），728 在拷贝范围内。
+- 镜像里的 shim 就是当前源码编的（前 0x30000 字节 sha1 前 16 位 `cef6c5421ce4622e`，
+  与 `ios-sweet/shim/out/shim-boot.img` 一致），二进制里**确有**对 `+728` 的 store
+  （文件偏移 `0x46ec`），`loader.c` 里也写着 `ba->memSizeActual = p->mem_size;`。
+- **矛盾**：shim 写 `0x2bf00000`、内核拷 736 B、0172 读 728 —— 却读出 0，
+  且 `dram-size` 看着是 914 MiB。**这一步必须先打掉，否则所有内存判据都是假的。**
+
+**修正上一轮的结论**：先前说"旧日志是旧 ADT 镜像、panic 那次镜像后来被重生成" —— **错**。
+两份日志的 55885 与 ADT 无关（两次镜像 ADT 不同、数字一模一样），真正的问题是
+内核看到的 boot_args/ADT 值不是 shim 刚写进去的。旧/新日志的 cmdline 不同
+（旧无 `fwinfo`、新有），确实是两次不同镜像的启动，但内存数字同源。
+
+### 17.5 为什么"没有 SWEET ADRENO"不能直接判"驱动没跑"
+
+- 同一份环里 `SWEET SCALER/ACCEL … stub registered` 也**没有**，但这两个类确实启动了：
+  `verify.txt:643–648` 有 backboardd 匹配 `AGXAccelerator`，`716–772` 打开
+  `AppleM2ScalerCSCDriver`；而它们在 0183 里的 `start()` 确实调了 `IOLog`
+  （`0xfffffe0007a76d6c` / `0x7a76d78 bl _IOLog`）。
+- 所以 **start 期的 IOLog 有丢失**。要判定 Adreno 到底跑没跑，必须
+  ①让启动活过 45 s（`sweettouchoff=1`），②最好在 probe 里加一条不依赖 IOLog 的证据
+  （例如往固定物理页写魔数，或让后续读取者打印）。
+- 弱证据：若 `stage 2` 真的把 GPU_CC 带起来了，touch 对 `GCC+0x15200c` 的读
+  大概率不会再外部中止；现在仍死在同一行 → **至少 stage 2 没把 GPU_CC 拉起来**。
+
+### 17.6 下一步（按顺序；确切命令）
+
+**第 0 步（必须先做）**：打一颗只加 6 行打印的诊断内核，把交付链路钉死。
+
+```c
+/* osfmk/arm64/arm_vm_init.c，函数最开头 */
+printf("SWEET BOOTARGS: memSize=%llu MiB memSizeActual=%llu MiB base=%llu MiB "
+    "dt=%p dram_arg=%llu MiB\n",
+    args->memSize >> 20, args->memSizeActual >> 20, args->physBase >> 20,
+    (void *)args->deviceTreeP, memory_size >> 20);
+```
+
+```bash
+cd ~/hackios
+MEMPLAN=p0 K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3" \
+  tools/k60-build-boot.sh <带上面打印的内核>.sweet artifacts/xnu-bootargs-probe.img
+adb reboot bootloader && fastboot boot artifacts/xnu-bootargs-probe.img
+# 回来进 TWRP 后：tools/k60-log-pull.sh /tmp/bootargs.txt
+```
+
+判读：
+
+| 现象 | 结论 | 下一步 |
+|---|---|---|
+| `memSizeActual=0` | shim 的 store 没落到内核看到的那份 boot_args | 查 shim 的 `_end`/payload 搜索、`PAYLOAD_SAFE_PA`、结构体偏移一致性 |
+| `dram_arg=914 MiB` | 内核读到的 ADT 是**旧的**（`0x39200000`），不是 shim 拷的那份 | 查 `adt_pa = kernel_end + (phys_base - virt_base)` 与 `deviceTreeP` 的 VA 换算 |
+| `memSize=1216 MiB` 且上面两项都对，仍 55885 | 0172 之后还有别的 clamp/static 吃页 | 再量 `avail_start/avail_end`（再加两行打印） |
+
+**第 1 步**：拿到一张真活过 45 s 的启动（这样才可能看到 Adreno）：
+
+```bash
+cd ~/hackios
+MEMPLAN=p0 K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3 sweettouchoff=1" \
+  tools/k60-build-boot.sh artifacts/kernel-adreno-0183.sweet \
+  artifacts/xnu-adreno-0183-notouch.img
+```
+
+`sweettouchoff=1` 由 0173 支持，touch 直接 return，`GCC+0x15200c` 不会被碰。
+
+**第 2 步**：判据顺序（这次是真的能判的版本）：
+`probe done` → `snapshot[pre-power] gdsc=… hwctl=…` → `GPUCC verified: n/7` →
+GMU 三段（`held in reset?` / `FW_INIT` / `HFI`）。`0/7` 或 `gdsc` 读成 `0xffffffff`
+都是"该块没时钟"，别急着解释成固件问题。
+
+**第 3 步**：`p1/p2` 在内核没 0184 notch 前继续禁刷；`K60_RDCHECK` 探针
+（`artifacts/xnu-rdcheck.img`，18 个地址版，120 s 自动回 fastboot）可随时插队，
+但它只回答"4 GiB 以上那个洞是不是死的"，与 GPU 无关。
+
+**第 4 步**：0185（GMU 固件）仍不在 CI 产物里，`sweetadreno_fwinfo=1` 在此之前
+只会得到 "fwinfo 无效"。
+
+### 17.7 本轮证据台账
+
+| 项 | 值 |
+|---|---|
+| 新日志 | `/tmp/verify.txt`，134,545 B / 1,671 行，16:38 拉取 |
+| 旧日志 | `/tmp/k60-adreno1.txt`，128,771 B / 1,570 行 |
+| 门禁行 | 两份都在**第 16 行**：`55885 free pages, 2611 wired pages` |
+| 新日志关键行 | 123（previous-boot dump）· 643–648 / 716–772（backboardd 匹配 stub）· 1668–1671（touch 死亡） |
+| 旧日志关键行 | 547/590/853（`flushed … seq 1/2/3`，证明周期 flusher 会累加 seq）· 1567–1570 |
+| 镜像 | `artifacts/xnu-adreno-m1m3-verify.img`、`artifacts/xnu-adreno-m1m3.img`、`artifacts/kernel-adreno-0183.sweet` |
+| 源码/补丁 | `ios-sweet/shim/loader.c:180–215`、0047/0156/0162/0171/0174、0060:245–248、0172/0173 |
+| 反汇编 | `0x748b478`（读 728）· `0x748b4a4`（cap 打印）· `0x7ae226c`（memmove 736）· `0x7a76d6c/0x7a76d78`（stub 的 IOLog）|
+| 设备 | 序列号 `ffec9d48`，停在 **TWRP**（`3.7.1_12-RedmiK60_v9.0_A15`），本轮只拉过日志，未刷未写 |
+
+复跑最小集：
+
+```bash
+grep -n vm_page_bootstrap /tmp/verify.txt
+grep -ac "SWEET ADRENO" /tmp/verify.txt            # 0
+tools/sym.py --kernel artifacts/kernel-adreno-0183.sweet 0xfffffe00074f2f98
+python3 ios-sweet/tools/adt.py dump /tmp/adt-m1m3.bin | head -20
+```
+
+---
+
+## 18. 2026-10-26 17:0x 更正：§17.4 的门禁"失败"是**读错行**，本轮门禁其实没测到
+
+> 一句话：`/tmp/verify.txt` 的**前 13,531 字节不是这次启动的 console**，是上一次启动
+> 的 console 被本次启动重打进来的。§17.4 拿这一段的第 16 行当"本次启动的页数"，
+> 于是得出"内核看到的 ADT 不是 shim 写的那份"——**这个结论没有任何证据支持**，
+> 连带 §17.6 的第一步（打诊断内核查交付链）也失去前提。
+
+### 18.1 证据 1：两份日志前 176 行**逐字节相同**，含不可能重复的计时
+
+```
+$ diff <(sed -n '1,140p' /tmp/k60-adreno1.txt) <(sed -n '1,140p' /tmp/verify.txt) | wc -l
+0
+$ diff <(sed -n '1,176p' ... ) ...                       # 同上，0 行差异
+```
+
+两次不同镜像、不同 cmdline 的启动，不可能都打印
+`pmap_startup() init/release time: 3626 microsec`（第 14 行）—— 这是微秒级实测值。
+两份日志的第 14/16 行同值同理。**第一次出现差异是第 177 行**：
+
+```
+176: SWEET AKS: suggestd sel 17 arg0 0 in 1/0 out 0/4096 -> 0x0
+177: SWEET AKSSWEET LOG: previous boot, last 2644 bytes (seq 1)
+```
+
+### 18.2 证据 2：dump 区有明确边界与长度
+
+| 项 | 值 |
+|---|---|
+| `SWEET LOG: end of previous boot log` | `verify.txt` 第 **227** 行，结束于第 **13,531** 字节 |
+| 本次启动自己的第一条 console | 第 **228** 行（字节 13,592）`SWEET KEYS: unsupported arbiter version=0x70000000 apids=768` |
+| 之后紧跟 | 229 `BSD root: ufsroot0` · 232 `SWEET LOG: console log to the last 4100 KiB` · 233 `SWEET LOG: thread running` · 234 `SWEET TOUCH: starting in 45 s` |
+| 文件总长 | 134,545 B（与 header 的 `total` 一致，没有被截断）|
+
+`grep -n vm_page_bootstrap verify.txt` → **只有第 16 行**。也就是说：**本次启动自己的
+`vm_page_bootstrap` 从来没有进过这份环**，不是"值是 55885"。
+
+### 18.3 根因：`0152-k60-log-dump.patch` 的 dump 把环的起点洗掉了
+
+`bsd/dev/sweet_ufs.c: sweet_log_dump()`（0152，第 66–76 行）做的是：
+
+```c
+/* Pull the ring in bounce-sized chunks into the (idle) static ring. */
+memcpy(sweet_log_ring + blk * UFS_BLOCK, bounce, n * UFS_BLOCK);   /* ← 直接写环 */
+...
+printf("SWEET LOG: previous boot, last %u bytes (seq %llu)\n", end - start, h.seq);
+for (...) printf("%c", c);                                          /* ← 又写回环 */
+```
+
+它把上一轮环的内容 memcpy 进 **同一个 `sweet_log_ring`**（注释自己写着 "the (idle)
+static ring"），再把这段内容 printf 出来。printf 走 console → 也写进
+`sweet_log_ring`。结果是**本次启动最开头的那一段 console（`SWEET-STAGE-40` …
+`pmap_startup` … `vm_page_bootstrap` … zone 列表 … `SWEET MEM:` 限幅打印）被前一次
+启动的内容覆盖**。dump 的调用点在 `sweet_log_thread` 启动处（0152 末尾的
+`+ sweet_log_dump();`），即 `BSD root` 挂上之后 —— 比写页数的时机晚，但写的位置
+是环的起点，所以把开头的记录洗掉了。
+
+`0171` 的注释其实已经踩到过这个坑（"nothing leaves the ring holding the previous
+boot, which reads like a …"），只是没人把它和页数行联系起来。
+
+### 18.4 那份 55885 到底是谁的：第 177 行之前的启动，base = 0x80000000
+
+用 §10 的页数模型（`tools/memplan-selftest/build/sim`）反解：
+
+```
+$ ./build/sim --start 0x82488000 --end 0xb9200000
+STAT span_pages=56158 npages=55885 array_pages=273 first=0x828cc000 free=55885
+```
+
+`0x82488000 = 0x80000000 + 0x2488000`（旧 kernel 的 topOfKernelData），
+`0xb9200000 = 0x80000000 + 0x39200000`（旧 `k60.adt` 的 dram-size）。这正是
+`artifacts/README-ADT.txt` 里那颗"会害死人"的旧布局启动 —— 它与**本次镜像无关**。
+
+对照本次镜像的真值（`k60-inspect-boot.py` + payload 头实读，见 §18.5）：
+`[0xb64e4000, 0xdff00000)` → `sim` 给 **42,423** 页，减去 0170 的 1,151 个面板页
+= **41,272** —— 与预期门禁值一致。
+
+### 18.5 顺手校准的两个常量（`memplan.py` 需要跟）
+
+payload 头在镜像文件偏移 **0x30000**（`0x8d3f` 那个 `SWEETXNU` 是 shim 里的字符串
+常量，不是头）。实读字段：
+
+| 字段 | 值 |
+|---|---|
+| version / nsegs | 1 / 10 |
+| virt_base | `0xfffffe0006000000` |
+| entry_va | `0xfffffe0007494488` |
+| adt_off / adt_size | `0xfe8d00` / `0x2774` |
+| kernel_end | `0xfffffe00084dc000` |
+| phys_base / mem_size | `0xb4000000` / `0x2bf00000` |
+| 推出 | `adt_pa=0xb64dc000`、`ba_pa=0xb64e0000`、`top=0xb64e4000`、**foot=`0x24e4000`** |
+
+`memplan.py` 里写的是 `KERNEL_FOOT = 0x24e0000`（差 4 页，P0 结果 42,424 vs 42,423）。
+段表最紧的一处：seg9 结束于 `0xb64d8910`，ADT 起于 `0xb64dc000`，**间隙只有 0x36f0**。
+
+### 18.6 对下一步的影响（改判）
+
+| 原计划 | 改判 |
+|---|---|
+| 打诊断内核查"内核看到的 ADT 是谁写的" | **不需要**。没有任何证据说交付链断了；ADT/结构体布局核对也一致（+24 memSize / +96 deviceTreeP / +108 CommandLine / +728 memSizeActual，`sizeof==736`）|
+| 0186 = 6 行早期打印 | 位置错了：早期打印**注定被 dump 洗掉**。改成在 `sweet_log_dump()` **之后**（`SWEET LOG: thread running` 一带）重打页数与 `args` 字段，那一段能活下来 |
+| 门禁判据 | 必须用**第 228 行之后**的内容；`grep -n vm_page_bootstrap` 只允许命中"本次启动段"里的行 |
+| Adreno 一行都没有 | 需要重判：`probe` 的打印在 `BSD root` 之后，属于"能活下来"的区域；所以 `SWEET ADRENO` = 0 仍然是真信号（或 IOLog 丢失），但**页数那条已经不能当证据** |
+
+**结论**：这一轮不是"内存交付链断了"，而是**量具坏了**。修量具（把页数/参数打印挪到
+dump 之后，或让 dump 不写环起点）比修链路便宜得多，且是获取任何 GPU 判据的前提。
+
+### 18.7 反汇编复核：内核的 boot_args 只有一份，且来自 shim 的 `x0`（排除"偏移错位"）
+
+对 `artifacts/kernel-adreno-0183.sweet` 的 `__TEXT_EXEC,__text` 整段反汇编（`llvm-objdump`）
+逐条追下来的结果：
+
+| 锚点 | 地址 | 汇编 | 含义 |
+|---|---|---|---|
+| 符号化 | `0x7ae226c` → `_arm_init+0x5f8`；`0x748b478` → `_arm_vm_init+0x74`；`0x748b4a4` → `_arm_vm_init+0xa0` | — | — |
+| 入口 | `0x7494488` | `b _start_first_cpu` | LC_UNIXTHREAD 的 pc |
+| 存 x0 | `0x74960f4` | `mov x20, x0` | shim 传的 boot_args PA |
+| 结构体读 | `0x7496148/614c/6150/6158` | `ldr x22,[x20,#8]` / `[x20,#0x10]` / `[x20,#0x18]` / `[x20,#0x2d0]` | virtBase / physBase / memSize / bootFlags |
+| PA→VA | `0x7496458/645c` | `add x0,x20,x22` / `sub x0,x0,x23` | `x0 = PA + virtBase − physBase` |
+| 拷进 const | `0x7ae2264/2268/226c` | `mov x0,x20` / `mov x1,x19` / `mov w2,#0x2e0` | dst=`_const_boot_args`(0x717ba68)，src=x19=shim 的那个指针，736 字节 |
+| 发布 | `0x7ae2278` | `str x20,[x8,#0xd48]` | `_BootArgs = &const_boot_args` |
+| 0172 读点 | `0x748b478` | `ldr x9,[x1,#0x2d8]` + `cmp/csel` | `memSizeActual ?: mem_size` |
+
+内核侧偏移（与 shim 的 `struct boot_args` 逐字段对照，全一致）：
+
+| 字段 | 内核 | shim |
+|---|---|---|
+| virtBase / physBase | +8 / +16 | +8 / +16 |
+| memSize | +24（`0x748b450 ldr x8,[x1,#0x18]`） | +24 |
+| topOfKernelData | +32（`0x748b528 ldr x0,[x28,#0x20]` 紧跟 `bl _phystokv`） | +32 |
+| Video | +40 | +40 |
+| machineType | +88 | +88 |
+| deviceTreeP | +96（`0x7a870b4 ldr x9,[x19,#0x60]` → `PE_state.deviceTreeHead`） | +96 |
+| deviceTreeLength | +104（`0x7a870bc ldr w9,[x19,#0x68]`） | +104 |
+| CommandLine | +108（`0x7a85784 add x0,x8,#0x6c`，`x8 = PE_state.bootArgs`） | +108 |
+| bootFlags | +720（`0x7496158 ldr x26,[x20,#0x2d0]`） | +720 |
+| memSizeActual | +728（`0x748b478`） | +728 |
+| sizeof | 736（`0x7ae226c mov w2,#0x2e0`） | 736 |
+
+→ **没有第二份副本，也没有从固定地址/DT `/chosen` 重取 boot_args 的路径**；
+"同一个 736 字节结构前半新后半旧"在结构上不可能。§18.1–18.4 的"日志读错行"
+是唯一自洽的解释。此外 `ci/xnu/pexpert/pexpert/arm64/boot.h:58` 的成员表与 shim 相同，
+这是"布局一致"的第二来源。
+
+### 18.8 镜像/shim 取证复核（同日，独立子分析）：三条假说全部排除，机制只剩 §18.3
+
+| 假说 | 判定 | 证据 |
+|---|---|---|
+| shim 写错字段/写错基址 | **排除** | shim `.text 0x36d4 ldr x8,[x22,#0x40]`（payload→mem_size）→ `0x36ec f9016e68 str x8,[x19,#0x2d8]`（+728 = memSizeActual）；`x19 = ba_pa` 由 `0x35bc and x19,x9,#~0x3fff` 得出 |
+| 抓错/陈旧 payload 副本 | **排除** | payload 头在**文件 0x30000**（内核区相对 0x2f000 = `nm shim.elf` 的 `_end`，`build.sh` 先 truncate 再 cat，命中 `off=0` 是确定性的）；`0x8d3f` 那个 `SWEETXNU` 是 `.rodata` 里的字符串常量，永远在扫描起点之前 |
+| 段/补零覆盖 ADT 或 boot_args | **排除（方向也反了）** | 最高段末尾 `0xb64d8910`，`adt_pa=0xb64dc000`，间隙 `0x36f0` = "最高段末尾→16K 对齐边界"的构造余量；且 `loader.c` 写序是 段(171–177) → ADT(182) → boot_args(186–217)，ADT/ba 最后落盘 |
+| ADT 里有第二份 dram 或旧布局残留 | **排除** | 全 ADT（0x2774 B）扫 LE u64：`0xb4000000`/`0x2bf00000`/`0xdff00000` 各 1 次；`0x80000000`/`0x39200000`/`0xb9200000`/`0x4c000000` 各 **0** 次。无 `/memory` 节点（用的是 `/chosen` dram-base/size） |
+| 镜像里的 shim 与 `loader.c` 不同源 | **排除** | `[0x1000,0x30000)` 的 sha256 = `13403464…294ad`，与 `out/Image[0:0x2f000]` 完全相同 |
+
+**dram 值**：`/chosen` dram-base `0xb4000000`、dram-size `0x2bf00000`、`/pram` `0xdff00000+0x100000`
+（`dram-base + dram-size == /pram base`，严丝合缝）。
+
+**`0x0152` dump 的变量流（决定性）**：
+
+```c
+/* 写侧 0047 */  at = os_atomic_add_orig(&sweet_log_total, size);  ring[(at+i)%SIZE] = c[i];
+/* dump 0152 */  want = MIN(h.total, SIZE);  first = (h.total - want) % SIZE;
+                 memcpy(sweet_log_ring + blk*UFS_BLOCK, bounce, n*UFS_BLOCK);  /* ← 盖同一批偏移 */
+```
+
+- `sweet_log_total` **从不重置**，写偏移 ≡ `total`，所以 dump 的 `memcpy` 恰好落在
+  "本次启动已写过的同一批偏移"上 —— **1:1 替换**，一个字节不剩。
+- 这不是巧合：上一轮 `h.total`（13,531）与本次到达 dump 时刻的 `total` 几乎相等
+  （启动前段确定性），所以每次启动都会整段换掉自己的早期 console。
+- 实证：`verify.txt[0:10832]` 与 `adreno1.txt[0:10832]` **逐字节相同**，第一个差异字节
+  落在一个内嵌 dump 头的 `seq` 数字上；重放区里嵌着 **4 个** 嵌套 dump 头
+  （`0x1c33/0x1c6d/0x1ca2/0x1d28`，N=4846/3056/3042/3394）= dump 文本自己进环、被再持久化。
+
+### 18.9 因此 0186 该写什么（三条，按可靠性）
+
+1. **根因**：`sweet_log_dump()` 不要拿 `sweet_log_ring` 当转储中转 —— 改成读进独立缓冲
+   或直接逐块打印，环不再被历史数据污染（`total` 与内容重新自洽）。一行不改语义。
+2. **门禁行必须持久化且可回放**：`v_page_free_count`/`avail_start`/`avail_end`/
+   `args->memSize`/`memSizeActual`/`topOfKernelData` 写进 **header block 的保留字段**
+   （该块 4096 B 只用了 ~40 B，flusher 每次 flush 都重写），下一轮 dump 打一行
+   `SWEET LOG: prev gate free_pages=N …`。**只"dump 之后重打一行"不够**：dump 只回放
+   最后 48 行，重打的行会被启动后段挤出窗口。
+3. **校准**：`memplan.py` 的 `KERNEL_FOOT` 应为 `0x24e4000`（现为 `0x24e0000`，差 4 页）；
+   `account(P0, foot=0x24e4000)` = **41271**，与 `k60-inspect-boot.py` 的 41272 差 1 页 ——
+   判据用 ±10，别卡 1 页。
