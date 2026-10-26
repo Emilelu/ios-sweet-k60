@@ -94,6 +94,15 @@ clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I stubs -ffreestanding
 | delayed（0x911c 不清 CLK_OFF） | `branch 0x911c halted (0xa0000000)` | `GPUCC up` |
 | busy（0x9318 update 位残留） | 继续写 mux（静默丢配置） | `root mux 0x9318 update already pending, stopping` |
 
+版本矩阵（`./run.sh <补丁号>` 的通过项数，单调递增即为补丁序列的净效果）：
+
+| 重建到 | 通过项 | 失败项 |
+|---|---|---|
+| 0179 | 3 | 3（hwcg / delayed / busy） |
+| 0180 | 6 | 0 |
+| 0181 | 10 | 0 |
+| 0182 | 12 | 0 |
+
 附带证据：`gpu-fw/gmu_gen70000.bin`（57,272 字节）用上游 `AdrenoFirmwarePlanGmu`
 + A730 的三段区域解析，返回 success、15 个块，ITCM 段 0x1dc、0x4000 段 0xdcac、
 `0x10007f98`/`0x10007fdc` 两个数据块都在——M3 的固件输入是结构合法的。

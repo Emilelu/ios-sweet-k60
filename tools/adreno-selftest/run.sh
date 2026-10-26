@@ -71,9 +71,13 @@ if grep -q 'sweet_adreno_preflight' "$HERE/build/SweetAdreno.cpp"; then
 	run prepowered "power domain already owned"
 	run stuck      "no branch reports running"
 	run mapfail    "MMIO mapping failed"
-	runx happy "sweetadreno=1,sweetadreno_stage=3" "GMU firmware has not reported FW_INIT OK"
-	runx gmulive "sweetadreno=1,sweetadreno_stage=3" "HFI is up"
 	run_nobootarg
+fi
+
+# 0182 起才有 sweetadreno_stage
+if grep -q 'sweetadreno_stage' "$HERE/build/SweetAdreno.cpp"; then
+	runx happy   "sweetadreno=1,sweetadreno_stage=3" "GMU firmware has not reported FW_INIT OK"
+	runx gmulive "sweetadreno=1,sweetadreno_stage=3" "HFI is up"
 fi
 
 # M3 预演：真固件 + GMU 引导/失败分支模型（不是内核代码，见 gmu-model.c）
