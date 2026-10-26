@@ -113,6 +113,7 @@ if grep -q 'sweetadreno_gmu' "$HERE/build/SweetAdreno.cpp"; then
 	runx gmureadback "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "gmu readback first mismatch at 0x5000"
 	runx gmubooterr "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "firmware reported an error in FW_INIT_RESULT"
 	runx gmulive "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "GMU is not held in reset"
+	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=3" "stopped after the CX halt clear"
 fi
 
 # M3 预演：真固件 + GMU 引导/失败分支模型（不是内核代码，见 gmu-model.c）
