@@ -951,3 +951,111 @@ M1/M2 之后（M1/M2 在 IOKit 匹配期就完成），所以堵不住门禁与 
 | M1 `probe done` | 有 | 有 | ✅ |
 | M2 `GPUCC verified: 7/7` | 7/7 | **7/7** | ✅ |
 | M3 `FW_INIT OK` | — | `0x0`（GMU 仍在 reset） | ⏳ 下一阶段 |
+
+## 21. 2026-10-26 18:5x 离线：M3 装载器（0187）写好，仿真 20/20
+
+用户不在设备旁，这一轮只做离线能做完的部分：**把 GMU 固件装载写出来并验证**。
+
+### 21.1 做了什么
+
+`xnu/patches/0187-k60-adreno-gmu-load.patch`，在 `SweetAdreno.cpp` 里新增
+`sweet_adreno_gmu_load()`，按 `PongAdrenoGmuStart` 逐段对应，但**只做纯 MMIO 能完成的部分**：
+
+- `sweetadreno_gmu=1`：把固件的 ITCM/DTCM 段按字写进 GMU 窗口（135 个字，
+  ITCM 0x1b400 / DTCM 0x1c400 起），**逐字回读比对**，然后写配置字
+  （FW_INIT=0、BOOT_CONFIG=2、CM3_CFG=0x4052、GENERAL_10=0x07030200、
+  GENERAL_9、AHB_FENCE=0x80c808a0、SYS_BUS/ICACHE/DCACHE）。
+  **不动 CM3_SYSRESET**，可重跑，用来先证明"这个窗口真的写得进去"。
+- `sweetadreno_gmu=2`：再加清 CX GBIF halt（kgsl+0x3c45*4 写 0、回读确认）、
+  放 `CM3_SYSRESET`、轮询 `FW_INIT_RESULT` 的 0x1ff==0x100；读到 `0xe00`
+  任意位置位就判固件报错；超时 100 ms 就把复位按回去，不留悬着的 CM3。
+- `stage=4/5` 是 1/2 的简写。
+
+### 21.2 明确没做的三样（会在日志里各打一行）
+
+1. **cache 段**（`0x4000` 起 56 KB）——上游放在 kgsl 的 16 MB GMU cache 里，
+   要先在内核侧要连续物理页并给出 iova；
+2. **HFI 队列表**（`HFI_QTBL_ADDR`）；
+3. **日志区**（`GENERAL_8`）。
+
+这三样是 0188 的活。所以 0187 最好只能走到 `FW_INIT=0x100`，**不要指望 HFI 起来**。
+
+### 21.3 离线怎么验的
+
+- `tools/adreno-selftest` 新增三个场景：`gmuboot`（写 SYSRESET=0 后固件才回 0x100）、
+  `gmureadback`（总线吞掉 ITCM 首字 → 必须报 `first mismatch at 0x5000`）、
+  `gmubooterr`（FW_INIT 报 0xe00 → 必须 rc=-2）。
+- `./run.sh 0187`：aarch64 目标真编译通过、C 符号未修饰、20 项全绿
+  （含 6 条 M3 分支）。
+- 另有既存的 `gmu-model.c`，用真固件（57,272 B）跑 TOC 解析与引导模型，11 项通过。
+
+### 21.4 上机时的判据
+
+```
+SWEET ADRENO: gmu upload wrote 135 words from 4 segments, 1 segment(s) skipped
+SWEET ADRENO: gmu readback 135 words, 0 mismatch
+SWEET ADRENO: CX GBIF halt cleared
+SWEET ADRENO: gmu boot rc=0 fw_init=0x100
+SWEET ADRENO: GMU firmware booted (FW_INIT 0x100); HFI start is 0188
+```
+
+第一条就失败（`outside the GMU window`）说明固件段表与窗口定义对不上；
+回读有 mismatch 说明窗口写不进去或位宽不对；`rc=-2` 看 FW_INIT 的 0xe00 位
+是哪一位；超时则 CM3 已被重新按回复位，可以再跑一次。
+
+---
+
+## 21. M3（GMU 固件装载）：0187 定稿、两次上机的顺序，以及"未确认"清单
+
+### 21.1 0187 的两种实现，只留了一个
+
+18:44 与 18:48 先后出现两份 0187（都改 `iokit/Kernel/arm/SweetAdreno.cpp`）：
+
+| 版本 | 内容 | 处置 |
+|---|---|---|
+| `dace546`（已提交，含 `tools/adreno-selftest` 的 6 条新用例，`run.sh 0187` 全绿） | `gmu=1` 上传 TCM + 逐字回读（**可重跑**）；`gmu=2` 才清 CX GBIF halt、放 `CM3_SYSRESET`、轮询 FW_INIT（100 ms 超时 + 失败回写复位）；入口自带 `syreset!=1` 与 `HFI bit0` 两道拒绝 | **保留** |
+| 另一份（未提交，453 行，比提交版多 157 行） | 语义相反（`=1` 就放复位），另有独立的 7/7 复核与回滚 | 归档 `/tmp/agent-0187.patch`（sha256 `ebafe02a…`），**不入库** |
+
+并存的后果是同一个文件里两套同名实现 → C++ 重复定义必炸，所以只能留一套。保留提交版的理由：
+① 自带仓库标准校验台（20 项全绿），② `=1` 默认不放复位（第一次上机更保守），
+③ 入口的两道拒绝（`syreset!=1` / `HFI bit0`）它本来就有 —— 另一份声称的"更安全"这点并不成立。
+
+### 21.2 两次上机的顺序（都很短）
+
+```bash
+# 第一次：只上传 + 回读，可重跑，不改复位
+K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3 sweetadreno_gmu=1"
+# 第二次：真放复位启动 CM3
+K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3 sweetadreno_gmu=2"
+# 两次都建议再加 sweettouchoff=1，免得 45 s 后被 touch 打断
+```
+
+判据：
+
+| 步骤 | 必须看到 |
+|---|---|
+| `gmu=1` | `gmu upload wrote … words … skipped`、`gmu readback … 0 mismatch`、`gmu load stopped before boot (mode=1, reset untouched)` |
+| `gmu=2` | 上面全部 + `CX GBIF halt cleared` + `gmu boot rc=0 fw_init=0x100` + `GMU firmware booted (FW_INIT 0x100); HFI start is 0188` |
+| 失败即停 | `GMU is not held in reset` / `HFI is already up` / `readback … mismatch` / `FW_INIT timeout after 100 ms` / `firmware reported an error` |
+
+`fw_init=0x100` 且 `hfi=0` 是**预期**组合：HFI 启动是 0188。
+
+### 21.3 未确认清单（照抄自独立实现的自查，必须在上机时留意）
+
+| # | 未确认项 | 现状 | 若出问题的第一动作 |
+|---|---|---|---|
+| 1 | `CM3_BOOT_CONFIG=2` 的位域含义 | 照抄 Pong（同一颗 SM8475/Cape）；`GPU-PORT-NOTES` §10 的模型也只断言"≠2 会超时" | FW_INIT 超时 → 先试 `0` |
+| 2 | ITCM/DTCM 字宽与 endian | 按 32 位小端拼字（Pong 用 `le32()`，寄存器窗口按 dword 索引） | 逐字回读会在第一个字就 mismatch 并停（不会带坏固件放复位）|
+| 3 | 是否要先清 TCM；`TCM_RET_CNTL`（`gpucc+0xe0e4`）的极性 | **两版都没写**（Pong 也不清） | 若 `readback failed`，这是第一嫌疑 |
+| 4 | HFI 中断线（kgsl 0x12c / GMU 0x130 / HFI 0x131）是否要在 M3 阶段先开 | **没开**：FW_INIT 走寄存器窗口回报，不经 HFI | 若 FW_INIT 一直 `0x0`，考虑补这一步 |
+| 5 | **cache 段（56,492 B，Pong 要求落在 IOVA 0x4000 的 GPU 可见内存）缺失** | 两版都跳过（要 SMMU/IOVA，属 0188） | 固件首次读 cache 时的行为未知：可能总线错/GBIF 挂死/静默。这是本轮最大未知量 |
+| 6 | `GENERAL_10=0x07030200`（Pong 注释写 `0x07030002`，值却是前者） | 照抄"值"不照抄注释 | 固件若按芯片号分支，这是第二嫌疑 |
+| 7 | `RSCC_SEQ_BUSY` 前置检查（Pong 有） | 没做：`0x3d50000` 未映射，读它是否安全未确认 | — |
+| 8 | `kgsl+0xf114`（CX GBIF halt）那一位的确切含义 | 只确认"Pong 写 0 并读回 0" | 读回非 0 就停 |
+
+### 21.4 与 B 线（软件渲染）的关系
+
+0187 只解决"GMU 能起来"；**能不能产生像素还要过 CP/ZAP/SQE 与 IOAccelerator 后端**。
+而 B 线的 4 字节 dyld 缓存补丁是另一条独立捷径（`QuartzCore` 的
+`EAGLServer::renderer()` 返回 NULL → 尾调用 `Server::render_update` → `OGL::SWContext`），
+两者互不阻塞，可以并行推进。
