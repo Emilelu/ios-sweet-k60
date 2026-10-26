@@ -853,3 +853,101 @@ dump 之后，或让 dump 不写环起点）比修链路便宜得多，且是获
 |---|---|---|
 | `xnu-diag-maxmem512.img` / `xnu-diag-adt512.img` / `xnu-diag-snp.img` / `xnu-diag-snp-p0.img` | `artifacts/` | **作废**，见 `artifacts/README-LEGACY-512.txt`：它们验证的是不存在的病，且 shim 里没有令牌 |
 | `maxmem512.txt` / `adt512.txt` / `snp.txt` / `verify.txt` / `k60-adreno1.txt` / `notouch.txt` | `artifacts/logs/2026-10-26/` | 归档为 §18 的证据，别再当"本次启动"读 |
+
+---
+
+## 20. 2026-10-26 18:21 上机（0186）：**门禁第一次真正测到，并且通过**；M1/M2 都过，M3 在门口
+
+镜像 `artifacts/xnu-0186-p0.img`（16,896,000 B，sha256 前 16 位 `5e3a523bdf191252`），
+内核 17,287,688 B（含 0183 + 0185 GMU 固件 + 0186 门禁），cmdline
+`sweetadreno=1 sweetadreno_stage=3`。日志 `/tmp/b0186.txt`，135,755 B。
+
+### 20.1 0186 生效的直接证据（先确认量具）
+
+```
+199: SWEET LOG: previous boot, last 3842 bytes (seq 31)     ← dump 头（重放 17:13 那次）
+268: SWEET LOG: end of previous boot log
+269: SWEET GATE: free=41272 …
+```
+
+**第 1–198 行是本次启动自己的 console**（`SWEET-STAGE-26` … `PE_init_iokit` …
+`bsd_init` …），这在修复前是**注定消失**的那一段。重放区只剩 199–268（3,842 B），
+不再是整段 13.5 KB —— 环没被洗，`total` 与内容重新自洽。
+
+### 20.2 门禁：**PASS**
+
+```
+SWEET GATE: free=41272 physBase=0xb4000000 memSize=0x4c000000 memActual=0x2bf00000
+            topk=0xb64e8000 dram=0x0 managed=0x2bf00000 gPhysSize=0x2bf00000
+```
+
+| 字段 | 观测 | 判定 |
+|---|---|---|
+| `free` | **41272** | ✅（`manage` 703 MiB 下的正确量级；模型 41270，差 2 页见下）|
+| `managed` / `gPhysSize` | `0x2bf00000` = 703 MiB | ✅ 0172 限幅生效 |
+| `memActual` | `0x2bf00000` | ✅ **shim 写的 = 内核读的**，交付链实测闭环 |
+| `topk` | `0xb64e8000` = `phys_base + 0x24e8000` | ✅ 与 payload 头一致 |
+| `dram` | `0x0` | ✅ 正常：这是 `arm_vm_init(memory_size=…)` 的入参，本移植给 0，限幅靠 `memSizeActual` |
+
+**模型差 2 页**：`span 42630 页 − npages 42422 = …`，实测被排除 **1150** 页，模型按
+0184 notch 表算 **1152** 页（18 MiB / 16 KiB）。32 KiB 的差在 `memplan-selftest`
+待修（`account()` 的 notched 计数），不影响判据（±10）。
+
+### 20.3 M1：probe done，但寄存器全是 0（不是 `0xffffffff`）
+
+```
+SWEET ADRENO: maps gpucc=0xfffffe8fff5fc000 ao=0xfffffe8fff60c000 gmu=0x…61c000
+SWEET ADRENO: gpucc[0..3]=0   ao[0..3]=0   gmu[0..3]=0
+SWEET ADRENO: probe done
+SWEET ADRENO: GMU is out of reset (bootloader or an earlier run started it)
+```
+
+gpucc/ao/gmu **全零**：既不是越界中止、也不是 `0xffffffff`，说明 ioremap 有效、路径通，
+只是上电前这些块不回读（或读的是复位值）。M1 的判据是"能读、不中止"，**通过**。
+
+### 20.4 M2：**7/7 分支全跑起来**（本次最大的进展）
+
+```
+preflight gdsc=0x22f001 power=0x5ff4 → 3/7 branches report running   ← bootloader 已开 3 条
+phase 1 GDSC (gpucc+0x9108) / 2 GCC branches / 3 PLLs / 4 root sources / 5 branches / 6 release
+SWEET ADRENO: GPUCC verified: 7/7 branches running
+SWEET ADRENO: GPUCC up
+SWEET ADRENO: clock sequence returned 0
+post-power: gdsc=0xf8228800 hwctl=0x80001fe0 tcs=0
+            br1(0x9144)=0x1 br3(0x913c)=0x2221 br4=0x1 br6(0x7000)=0x1  （工作位全部清零）
+```
+
+即 0180 的三处时钟语义修正 + 0181 的收尾验证都是对的：**GPUCC 完整上电，7/7**。
+
+### 20.5 M3：GMU 还按在复位里（下一道门）
+
+```
+snapshot[post-power-ok] gmu syreset=0x1 boot=0 finit=0 hfi=0
+SWEET ADRENO: GMU is held in reset (M3 has not run yet)
+SWEET ADRENO: GMU firmware has not reported FW_INIT OK (0x0)
+SWEET ADRENO: HFI is not up (0x0)
+```
+
+0185 只是把固件**嵌进内核**（`fw vector` 字符串在、`sweetadreno_fwinfo` 在），没有装载器。
+所以 M3 的正确下一步是：把 `gmu_gen70000.bin` 搬进 GMU ITCM（`0x1b400` 起按字）、
+置 `CM3_BOOT_CONFIG`、开 `CM3_SYSRESET`、轮询 `FW_INIT_RESULT` 的 0xe00 位，
+再接 HFI。**这块可以直接照着 `refs/UniXNU-pong/drivers/PongAdreno/PongAdrenoGmu.c` +
+`PongAdrenoHfi.c` 移植**（共 ~280 + HFI 行），STUB 里已经是同一套寄存器语义。
+
+### 20.6 仍然存在的干扰：45 s 后 touch 打死
+
+日志尾部仍是 `SWEET TOUCH: gcc probe vote read`（`GCC+0x15200c` 同步外部中止）。它发生在
+M1/M2 之后（M1/M2 在 IOKit 匹配期就完成），所以堵不住门禁与 M1/M2 的判定，但会阻止更长
+的观察。下一轮换成 `sweettouchoff=1` 即可（0173 支持），届时才能看到 launchd 之后的东西
+以及 GMU/HFI 的后续。
+
+### 20.7 本轮判据表
+
+| 项 | 期望 | 实测 | 结论 |
+|---|---|---|---|
+| `SWEET GATE` 存在且在重放边界之后 | 是 | 269 行 | ✅ 0186 生效 |
+| `free` | 41272±10 | 41272 | ✅ |
+| `managed`/`memActual` | `0x2bf00000` | 同 | ✅ 交付链闭环 |
+| M1 `probe done` | 有 | 有 | ✅ |
+| M2 `GPUCC verified: 7/7` | 7/7 | **7/7** | ✅ |
+| M3 `FW_INIT OK` | — | `0x0`（GMU 仍在 reset） | ⏳ 下一阶段 |

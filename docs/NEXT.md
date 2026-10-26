@@ -1,5 +1,21 @@
 # 回来后从这里继续
 
+> **2026-10-26 18:21 上机结果（0186）：门禁 PASS，M1/M2 全过，卡在 M3**
+> - `SWEET GATE: free=41272 physBase=0xb4000000 memSize=0x4c000000 **memActual=0x2bf00000**
+>   topk=0xb64e8000 dram=0x0 **managed=0x2bf00000** gPhysSize=0x2bf00000` → `gate: PASS`
+>   （模型 41270 vs 实测 41272，差 2 页 = 面板 notch 实际 1150 页，模型待修）
+> - 0186 证明有效：日志第 1–198 行是**本次启动自己的** console（修复前必丢）；重放区只剩
+>   199–268（3,842 B）。
+> - **Adreno M1 `probe done`**：gpucc/ao/gmu 读数为 **0**（不是 0xffffffff，路径通）。
+> - **Adreno M2 `GPUCC verified: 7/7` / `GPUCC up`**：preflight 时 bootloader 只开了 3/7，
+>   六个阶段跑完 7/7，post-power `gdsc=0xf8228800 hwctl=0x80001fe0`。
+> - **M3 未做**：`GMU is held in reset (syreset=0x1)`、`FW_INIT=0`、`HFI=0`。0185 只嵌入固件，
+>   装载器还没写 —— 下一步照 `refs/UniXNU-pong/drivers/PongAdreno/{PongAdrenoGmu.c,PongAdrenoHfi.c}`
+>   移植（ITCM `0x1b400` 按字、`CM3_BOOT_CONFIG`、`CM3_SYSRESET`、轮询 `FW_INIT_RESULT` 0xe00）。
+> - 干扰项：45 s 后仍被 `SWEET TOUCH: gcc probe vote read` 打死 → 下一轮换 `sweettouchoff=1`。
+> - 日志 `/tmp/b0186.txt`（135,755 B）；镜像 `artifacts/xnu-0186-p0.img`（sha256 前 16 位 `5e3a523bdf191252`）。
+> - 完整证据：`GPU-PORT-NOTES.md` §20。
+
 > **2026-10-26 18:00 两线并行（当前）**
 > - **A 线（设备）**：CI run `40300004313`（head `6874c9d`，含 0186）产物 `xnu-kernel`
 >   93,924,078 B 已出（`Build` 红是老毛病、`Collect` 绿）。正用
