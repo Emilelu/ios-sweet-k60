@@ -165,6 +165,22 @@ static void install_hooks()
 		m->w[0x16070 / 4] = 0x100;             /* CM3_FW_INIT_RESULT */
 		m->w[0x16600 / 4] = 1;                 /* HFI_CTRL_STATUS */
 	}
+	/* gmuboot：CM3 被握着复位，写 SYSRESET=0 之后固件才报 FW_INIT=0x100，
+	 * 用来跑通 M3 的完整路径（上传 + 回读 + 配置 + 放复位 + 轮询）。 */
+	if (g_scenario == "gmuboot" || g_scenario == "gmureadback" ||
+	    g_scenario == "gmubooterr") {
+		Block *m = blk(0x3d68000);
+		m->w[0x16000 / 4] = 1;                 /* CM3_SYSRESET：holding */
+		m->hook = [m](uint32_t off, bool wr, uint32_t val) -> uint32_t {
+			if (wr && off == 0x16000 && (val & 1) == 0) {
+				if (g_scenario == "gmubooterr") m->w[0x16070 / 4] = 0x400;  /* 固件报错 */
+				else m->w[0x16070 / 4] = 0x100;
+			}
+			/* gmureadback：ITCM 头一个字读回来永远是 0，模拟总线不落地 */
+			if (!wr && g_scenario == "gmureadback" && off == 0x5000) return 0;
+			return m->w[off / 4];
+		};
+	}
 }
 
 static Block *blk_by_base(volatile void *base)

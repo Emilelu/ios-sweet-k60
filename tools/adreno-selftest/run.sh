@@ -105,6 +105,16 @@ if grep -q 'sweetadreno_fwinfo' "$HERE/build/SweetAdreno.cpp"; then
 	runx happy "sweetadreno=1,sweetadreno_fwinfo=1" "fw vector sp=0x10007f80 pc=0x105 plausible"
 fi
 
+# 0187 起才有 M3 装载：先在仿真里把五条分支走一遍，再上真机
+if grep -q 'sweetadreno_gmu' "$HERE/build/SweetAdreno.cpp"; then
+	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=1" "gmu load stopped before boot"
+	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=1" "gmu readback 135 words, 0 mismatch"
+	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "GMU firmware booted (FW_INIT 0x100)"
+	runx gmureadback "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "gmu readback first mismatch at 0x5000"
+	runx gmubooterr "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "firmware reported an error in FW_INIT_RESULT"
+	runx gmulive "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "GMU is not held in reset"
+fi
+
 # M3 预演：真固件 + GMU 引导/失败分支模型（不是内核代码，见 gmu-model.c）
 echo "[gmu] 固件与 GMU 引导模型"
 if gcc -O1 -o "$HERE/build/gmu-model" "$HERE/gmu-model.c" 2>/dev/null; then
