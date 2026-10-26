@@ -103,7 +103,7 @@ clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I stubs -ffreestanding
 | 0181 | 0（同上） | 10 | 加预检与收尾验证 |
 | 0182 | 0（同上） | 12 | 加分阶段与快照 |
 | 0183 | 12 | 12 | 修完 `extern "C"`，守卫放行 |
-| 0184 | 14 | 14 | 加固件自检（0183 之后才有意义） |
+| 0185 | 14 | 14 | 加固件自检（0183 之后才有意义） |
 
 0179–0182 是历史版本，本身带着 C++ 修饰符号，链接守卫会直接拦下；回看它们的
 时钟语义时用 `K60_ALLOW_MANGLED=1`。
@@ -273,17 +273,17 @@ $ nm -u sa-0183.o | grep -E 'ml_io_map|delay'
 - B. 由 boot payload 追加一段、按 boot-arg 传物理地址：补丁干净，但要改 `mkpayload`/shim；
 - C. 先不做，M3 继续只读。
 
-**决定：A，已落地（`0184-k60-adreno-gmu-firmware.patch`）。**
+**决定：A，已落地（`0185-k60-adreno-gmu-firmware.patch`）。**
 
 - `tools/mk-gmu-fw.py gpu-fw/gmu_gen70000.bin > SweetAdrenoGmuFw.h`：
   57,272 字节 → 296,573 字节头文件（数组 + 4 段段表），生成时回读校验字节一致、
   段表与长度自洽。
-- 0184 把 `iokit/Kernel/arm/SweetAdrenoGmuFw.h` 加进补丁序列，并在
+- 0185 把 `iokit/Kernel/arm/SweetAdrenoGmuFw.h` 加进补丁序列，并在
   `sweetadreno_fwinfo=1` 下只读打印：`firmware 57272 bytes in kernel, 4 segments`、
   四段地址/长度/目标，以及从数组里读出的向量表
   （实测 `sp=0x10007f80 pc=0x105 plausible`）。整个过程零 MMIO，可以和 M1 同一次启动验掉。
 - **上传本身还没做**：cache 段（0xdcac 字节）必须落在 GPU 可见内存、HFI 队列需要
-  IOVA，这要 kgsl SMMU；在那之前写 ITCM/CM3_SYSRESET 只是半条路，`0184` 不做。
+  IOVA，这要 kgsl SMMU；在那之前写 ITCM/CM3_SYSRESET 只是半条路，`0185` 不做。
 
 ## 13. CI 产物实测（2026-10-26，run 40276193603）
 
@@ -358,7 +358,7 @@ HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading     3,999,38
 
 | # | 事项 | 选项 | 建议 |
 |---|---|---|---|
-| 1 | GMU 固件进内核（M3 前置） | **已定 A：编成 C 数组**（0184 落地） | 已执行 |
+| 1 | GMU 固件进内核（M3 前置） | **已定 A：编成 C 数组**（0185 落地） | 已执行 |
 | 3 | 是否把这些提交推到远端 | 推／不推 | 推，推完 CI 出带 0184 的内核 |
 
 第 3 项等内存侧把提交归属理完再一次性推；现有镜像
@@ -369,7 +369,7 @@ HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading     3,999,38
 | 项 | 状态 |
 |---|---|
 | 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0184 固件入内核（`0168` 已删） |
-| 本地自测 | `./run.sh 0184` 14 项全过；GMU 引导模型 11 项全过 |
+| 本地自测 | `./run.sh 0185` 14 项全过；GMU 引导模型 11 项全过 |
 | CI 内核 | `artifacts/kernel-adreno-0183.sweet`（17,303,824 字节，`NOUNDEFS`，含 0179–0183） |
 | 可刷镜像 | `artifacts/xnu-adreno-m1m3.img`，cmdline `sweetadreno=1 sweetadreno_stage=3` |
 | 未推 | 本轮全部提交（等内存侧修完归属） |
