@@ -359,16 +359,16 @@ HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading     3,999,38
 | # | 事项 | 选项 | 建议 |
 |---|---|---|---|
 | 1 | GMU 固件进内核（M3 前置） | **已定 A：编成 C 数组**（0185 落地） | 已执行 |
-| 3 | 是否把这些提交推到远端 | 推／不推 | 推，推完 CI 出带 0184 的内核 |
+| 3 | 是否把这些提交推到远端 | 推／不推 | 推，推完 CI 出带 0185 的内核 |
 
 第 3 项等内存侧把提交归属理完再一次性推；现有镜像
-（`artifacts/xnu-adreno-m1m3.img`）已可刷，不含 0184。
+（`artifacts/xnu-adreno-m1m3.img`）已可刷，不含 0185。
 
 ## 16. 本轮最终状态（2026-10-26 收尾）
 
 | 项 | 状态 |
 |---|---|
-| 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0184 固件入内核（`0168` 已删） |
+| 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0185 固件入内核（`0168` 已删） |
 | 本地自测 | `./run.sh 0185` 14 项全过；GMU 引导模型 11 项全过 |
 | CI 内核 | `artifacts/kernel-adreno-0183.sweet`（17,303,824 字节，`NOUNDEFS`，含 0179–0183） |
 | 可刷镜像 | `artifacts/xnu-adreno-m1m3.img`，cmdline `sweetadreno=1 sweetadreno_stage=3` |
@@ -380,7 +380,7 @@ HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading     3,999,38
 
 ```
 cd ~/hackios
-# 1) 用最新内核重打镜像（含 0184 时需要重新拉 CI 产物）
+# 1) 用最新内核重打镜像（含 0185 时需要重新拉 CI 产物）
 K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3 sweetadreno_fwinfo=1" \
   ./tools/k60-build-boot.sh artifacts/kernel-<最新>.sweet artifacts/xnu-adreno.img
 fastboot boot artifacts/xnu-adreno.img          # M1+M2+M3 只读，一次启动

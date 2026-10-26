@@ -18,10 +18,10 @@
 
 | 项 | 值 |
 |---|---|
-| 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0184 GMU 固件入内核（`0168` 已删：上下文被 0064 取代、宽授权有害，见 GPU-PORT-NOTES §14） |
+| 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0185 GMU 固件入内核（`0168` 已删：上下文被 0064 取代、宽授权有害，见 GPU-PORT-NOTES §14） |
 | 本地自测 | `cd k60-repo-full/tools/adreno-selftest && ./run.sh 0185` → 14 项全过；`gmu-model` 11 项全过 |
 | CI 内核（0179–0183） | `artifacts/kernel-adreno-0183.sweet`，17,303,824 字节，`NOUNDEFS` |
-| 可刷镜像 | `artifacts/xnu-adreno-m1m3.img`（cmdline `sweetadreno=1 sweetadreno_stage=3`）——**不含 0184** |
+| 可刷镜像 | `artifacts/xnu-adreno-m1m3.img`（cmdline `sweetadreno=1 sweetadreno_stage=3`）——**不含 0185** |
 | 未推 | 本轮提交（等内存侧修完提交归属） |
 | M3 上传 | 未实现；cache 段要 GPU 可见内存、HFI 要 IOVA，依赖 kgsl SMMU |
 
