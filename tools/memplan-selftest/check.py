@@ -146,7 +146,11 @@ def main():
 
     print('\n[4/5] the ADT mkadt.py generates for each plan describes that window')
     tmp = tempfile.mkdtemp(prefix='memplan-')
-    for plan in M.PLANS:
+    can_mkadt = 'ADT_PHYS_BASE' in open(mkadt_path()).read()
+    if not can_mkadt:
+        print('  skip ADT check: %s has no ADT_PHYS_BASE/ADT_MEM_SIZE support '
+              '(the K60 build uses ios-sweet/tools/mkadt.py)' % mkadt_path())
+    for plan in (M.PLANS if can_mkadt else []):
         acc = M.account(plan, notches)
         if plan.get('experimental'):
             print('  skip %s ADT (experimental)' % plan['name'])
