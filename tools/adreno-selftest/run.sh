@@ -19,6 +19,19 @@ clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I "$HERE/stubs" -ffree
         -o "$HERE/build/SweetAdreno-aarch64.o"
 echo "[2/3] aarch64 目标编译通过（保留 dsb sy 内联汇编）"
 
+# 链接期守卫：C++ 文件里声明 C 函数若漏了 extern "C"，符号会变成 _Z... 而内核
+# 里叫原名，CI 才会在链接阶段挂。这里在本地就把这类符号抓出来。
+# 允许清单只有编译器为虚析构/new 生成的运行期符号。
+BAD=$(nm -u "$HERE/build/SweetAdreno-aarch64.o" | awk '{print $NF}' \
+      | grep '^_Z' | grep -vE '^_Zd[la]P|^_Zn[aw]m' || true)
+if [ -n "$BAD" ]; then
+	echo "  FAIL 未定义符号里还有 C++ 修饰名（漏了 extern \"C\"）："
+	echo "$BAD" | sed 's/^/       /'
+	exit 1
+fi
+echo "      C 符号名未修饰（链接期不会找不到）：$(nm -u "$HERE/build/SweetAdreno-aarch64.o" \
+	| awk '{print $NF}' | grep -vE '^_Z' | tr '\n' ' ')"
+
 # x86 仿真版：只换访问器、dsb 与 C 链接声明，寄存器逻辑一行不动
 python3 "$HERE/simify.py" "$HERE/build/SweetAdreno.cpp" "$HERE/build/SweetAdreno-sim.cpp"
 clang++ -std=c++17 -O1 -DSWEET -I "$HERE/stubs" -I "$HERE/build" -fno-exceptions -fno-rtti \
