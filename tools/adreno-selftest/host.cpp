@@ -46,7 +46,7 @@ static Block *blk(uint64_t pa)
 
 static bool g_mapfail;
 
-vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size)
+extern "C" vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size)
 {
 	Block *b = blk((uint64_t)phys);
 	if (g_mapfail && (uint64_t)phys == (uint64_t)0x3d90000) {
@@ -59,7 +59,7 @@ vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size)
 	return (vm_offset_t)b->w.data();
 }
 
-void delay(int us) { g_delay_us += us > 0 ? (unsigned long)us : 0; }
+extern "C" void delay(int us) { g_delay_us += us > 0 ? (unsigned long)us : 0; }
 
 extern "C" int PE_parse_boot_argn(const char *name, void *out, int max)
 {

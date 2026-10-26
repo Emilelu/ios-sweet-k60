@@ -19,11 +19,8 @@ clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I "$HERE/stubs" -ffree
         -o "$HERE/build/SweetAdreno-aarch64.o"
 echo "[2/3] aarch64 目标编译通过（保留 dsb sy 内联汇编）"
 
-# x86 上只换掉 dsb 屏障与两处裸指针访问，寄存器逻辑一行不动
-sed -e 's|return \*(volatile uint32_t \*)((volatile char \*)base + off);|return sweet_host_rd(base, off);|' \
-    -e 's|\*(volatile uint32_t \*)((volatile char \*)base + off) = v;|sweet_host_wr(base, off, v);|' \
-    -e 's|__asm__ volatile("dsb sy" ::: "memory");|/* x86 无 dsb：空操作 */|' \
-    "$HERE/build/SweetAdreno.cpp" > "$HERE/build/SweetAdreno-sim.cpp"
+# x86 仿真版：只换访问器、dsb 与 C 链接声明，寄存器逻辑一行不动
+python3 "$HERE/simify.py" "$HERE/build/SweetAdreno.cpp" "$HERE/build/SweetAdreno-sim.cpp"
 clang++ -std=c++17 -O1 -DSWEET -I "$HERE/stubs" -I "$HERE/build" -fno-exceptions -fno-rtti \
         "$HERE/host.cpp" -o "$HERE/build/selftest"
 echo "[3/3] 仿真台编译通过"
