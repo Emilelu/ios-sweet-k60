@@ -11,8 +11,13 @@
 - **构建**：`K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_verbose=1" ./tools/k60-build-boot.sh <kernel> <out.img>`，
   已实测能打出 cmdline 正确的镜像（`artifacts/xnu-adreno-cmd.img`）。但现有
   `kernel-accel.sweet` **不含 Adreno 代码**，要等 CI 编出 0179/0180 的内核。
-- **卡点**：xnu 只能 macOS 编；本轮没有推送任何远端，CI 还没编过 0179/0180。
-  上机前必须先让 CI 出一颗带 `SWEET ADRENO` 字符串的 kernel。
+- **CI 已出内核（2026-10-26）**：run `40276193603` 的 `xnu-kernel` 94.0MB，内核
+  17,303,824 字节、Mach-O `NOUNDEFS`、含 0179–0183 全部字符串。注意 CI 的 `Build`
+  是红的（自 10-23 起一直红、与 Adreno 无关），但 `Collect` 是 `if: always()`，
+  产物照样可用——别再用「等绿」当判据。
+- **镜像已就绪**：`artifacts/xnu-adreno-m1m3.img`（cmdline 含
+  `sweetadreno=1 sweetadreno_stage=3`），设备回来直接
+  `fastboot boot` 它，一次启动就能看 M1→M2→M3 三段。
 - 代理与模型两件事本轮已改（`~/.local/bin/miyu`、`opencode` 包装器；
   `~/.miyu/config/config.jsonc` 默认模型 → `glm-5.3`）。Gitee 仍然搁置。
 

@@ -274,3 +274,35 @@ $ nm -u sa-0183.o | grep -E 'ml_io_map|delay'
 `tools/mk-gmu-fw.py gpu-fw/gmu_gen70000.bin > SweetAdrenoGmuFw.h`
 生成 57,272 字节 → 296,216 字节头文件，脚本会把生成的数组回读解析、
 与源文件逐字节比对（实测一致），头文件单独 g++ 编译通过。
+
+## 13. CI 产物实测（2026-10-26，run 40276193603）
+
+结论先说：**CI 的 `Build` 步骤是红的，但产物是可用的内核，且含 0179–0183 全部代码。**
+
+| 项 | 值 |
+|---|---|
+| run | `40276193603`（`2792bf6`，含 0179/0180/0181/0182/0183） |
+| 产物体积 | `xnu-kernel` 94.0 MB（整包）；内核本体 `kernel.development.sweet` 17,303,824 字节 |
+| 内核头 | `Mach-O 64-bit arm64 executable, flags:<NOUNDEFS|PIE>` |
+| `NOUNDEFS` | 链接期没有未定义符号 → 0183 的 `extern "C"` 修复生效（0182 会带着 `_Z5delayi` 挂在这里） |
+| 字符串 | `SWEET ADRENO: probe done` 1、`GPUCC up` 1、`preflight` 3、`snapshot` 3、`chipid is the DT constant` 1、`kgsl read skipped` 1、`clock sequence returned` 1、`branch` 1 |
+| 对照 | `SWEET SCALER`（0177）2、`SWEET ACCEL`（0178）3 也在 |
+
+两个由此更正的事实：
+
+1. **CI 不需要"绿"也能出内核。** `Collect` / upload 步骤是 `if: always()`，`Build` 失败
+   之后仍会把 `out/` 打包上传。内核既然 `NOUNDEFS` 且带新字符串，说明失败发生在
+   **编译/链接之后**（打包或附加目标），不影响我们要的东西。
+2. **这个红不是 Adreno 补丁引起的。** 最近 25 次 run 全红；最后一次 success 是
+   2026-10-23 05:31（`e6f1b79`），而 `0958d4f`…`e1afab0`（都早于 0179）同样是
+   `Build` 5.5–6 分钟失败。所以「等 89MB 成功」这个判据本身不成立，应改成
+   「看 `xnu-kernel` 里有没有当轮的字符串 + 内核准入符号」。
+   红的具体原因仍在查（日志包分段下载中），查到后补在这里。
+
+由此得到的可刷镜像（本轮实际生成，未上机）：
+
+```
+artifacts/kernel-adreno-0183.sweet   17,303,824 字节   003-0183 的 CI 内核
+artifacts/xnu-adreno-m1m3.img        16,896,000 字节   cmdline 含
+                                     "sweetadreno=1 sweetadreno_stage=3"
+```
