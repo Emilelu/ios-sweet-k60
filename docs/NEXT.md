@@ -1,5 +1,30 @@
 # 回来后从这里继续
 
+> **2026-10-26 18:00 两线并行（当前）**
+> - **A 线（设备）**：CI run `40300004313`（head `6874c9d`，含 0186）产物 `xnu-kernel`
+>   93,924,078 B 已出（`Build` 红是老毛病、`Collect` 绿）。正用
+>   `tools/ci-fetch-kernel.sh 40300004313` 拉取；**到手后必须先验**：含 `SWEET GATE` 字符串
+>   + Mach-O `NOUNDEFS`，否则不能上机。上机判据只有一条：`SWEET GATE: free=41271±10`。
+> - **B 线（离线）**：`c23ce2` 在挖 QuartzCore 的渲染器选择逻辑（目标：让 CA 走
+>   `CA::OGL::SW` 软件光栅化，绕开 Adreno 也能出真界面）。素材 = `iosroot/root-hfsx.img`
+>   里的 dyld 共享缓存，用 `7z` 只提取需要的文件。
+> - 仓库：`6874c9d`（0186）+ `7721dcd`（shim 同步/回读令牌/memplan 校准/文档 §18.10/§19）
+>   都已推到 `main`；后者不含 `xnu/patches/**`，**没有**触发新 CI。
+> - 真值校准：门禁是 **41271**（不是 41272；41272 属于更短内核 `kernel_end 0x84d8000`）。
+>   `memplan.py KERNEL_FOOT=0x24e4000`、`k60-inspect-boot.py` 按 `(base,size,foot)` 索引。
+
+### 0187 待办（0186 已验证但有三处行为要改，见 GPU-PORT-NOTES §19 与 logtail-selftest）
+1. `tail` 打满 16 KiB 时补一行显式截断标记（现在尾部大 hexdump 会把 panic 正文挤掉，
+   且头行读起来像完整日志）。
+2. 48 行是**下界**不是上限（密集换行实测 232 行）；要么注明，要么改成先找行边界。
+3. 打印起点落在 4096 块边界，首行常是半行；改成回退到上一个换行会更像旧行为。
+> 这三条不影响本轮（存活日志 `total` ~150 KB，走不到 16 KiB 上限）。
+
+### 已知的"别再做"清单
+- 别再怀疑 shim/ADT 交付链：反汇编已证 boot_args 只有一份、来自 `x0`、偏移与 shim 逐字段一致。
+- 别再把日志第 16 行当本次页数：那是 `sweet_log_dump()` 重放的**上一次**启动内容。
+- 别用 `artifacts/xnu-diag-*512.img`、别信 `maxmem=512`/ADT 511 那一支（治的是不存在的病）。
+
 > **2026-10-26 17:00 更正（先读这条）**：§17.4 的"内存门禁失败"是**读错行**。
 > `/tmp/verify.txt` 前 13,531 字节是上一次启动的 console 被本次启动 `sweet_log_dump()`
 > 重打进来的（与 `/tmp/k60-adreno1.txt` 前 176 行逐字节相同，连 `3626 microsec`
