@@ -10,6 +10,7 @@
  */
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstring>
 #include <cmath>
@@ -43,9 +44,15 @@ static Block *blk(uint64_t pa)
 	return nullptr;
 }
 
+static bool g_mapfail;
+
 vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size)
 {
 	Block *b = blk((uint64_t)phys);
+	if (g_mapfail && (uint64_t)phys == (uint64_t)0x3d90000) {
+		printf("[host] 故意让 gpucc 映射失败\n");
+		return 0;
+	}
 	if (!b) { printf("[host] ml_io_map(%#lx) 没有对应块\n", (unsigned long)phys); return 0; }
 	if (size > b->size) { printf("[host] ml_io_map(%#lx, %#lx) 超出块大小 %#x\n",
 	    (unsigned long)phys, (unsigned long)size, b->size); return 0; }
@@ -127,6 +134,37 @@ static void install_hooks()
 	};
 	/* busy 场景：根 mux 的 update 位残留为 1 */
 	if (g_scenario == "busy") g->w[0x9318 / 4] = 1;
+	/* prepowered：固件已经打开 GDSC（0x9108 bit1），且七条 branch 都在跑 */
+	if (g_scenario == "prepowered") {
+		g->w[0x9108 / 4] = 2;
+		for (uint32_t off : { 0x9004u, 0x9144u, 0x93e8u, 0x913cu, 0x9148u, 0x911cu, 0x7000u })
+			g->w[off / 4] = 0;
+	}
+	/* stuck：branch 写完 CLK_OFF 也不消（0xa... 不是 NOC 的 0x2...） */
+	/* stuck：等 CLK_OFF 期间一切正常，临时 force 一放（phase 6）时钟就垮掉。
+	 * 这正是"写完不等于时钟在跑"，用来验证收尾自检真的会失败。 */
+	if (g_scenario == "stuck") {
+		g->hook = [g](uint32_t off, bool wr, uint32_t val) -> uint32_t {
+			if (wr && off == 0x9108 && (val & 0x8000)) g->w[0x953c / 4] |= 0x80000000u;
+			if (wr && is_source_mux(off) && !(val & 2)) {
+				for (uint32_t b : { 0x9004u, 0x9144u, 0x93e8u, 0x913cu, 0x9148u, 0x911cu, 0x7000u })
+					g->w[b / 4] = 0xa0000000u;
+				return g->w[off / 4] & ~2u;
+			}
+			if (wr && is_gpu_branch(off) && (val & 1)) return 0;
+			if (wr && is_source_mux(off) && (val & 1)) return g->w[off / 4] & ~1u;
+			return g->w[off / 4];
+		};
+	}
+	if (g_scenario == "mapfail") g_mapfail = true;
+	/* gmulive：GMU 已跑起来（FW_INIT=0x100、HFI up、不在复位）。
+	 * 偏移用 SWEET_GMU_OFF 的算法手算：0x1f800→0x16000 等。 */
+	if (g_scenario == "gmulive") {
+		Block *m = blk(0x3d68000);
+		m->w[0x16000 / 4] = 0;                 /* CM3_SYSRESET */
+		m->w[0x16070 / 4] = 0x100;             /* CM3_FW_INIT_RESULT */
+		m->w[0x16600 / 4] = 1;                 /* HFI_CTRL_STATUS */
+	}
 }
 
 static Block *blk_by_base(volatile void *base)
@@ -187,6 +225,24 @@ int main(int argc, char **argv)
 	printf("=== 场景 %s，boot-args \"%s\" ===\n", g_scenario.c_str(), bootargs.c_str());
 	SweetAdreno svc;
 	svc.start(nullptr);
-	printf("=== 延时合计 %lu us，写入 %zu 次 ===\n", g_delay_us, g_writes.size());
-	return 0;
+	printf("=== 延时合计 %lu us，读取 %zu 次，写入 %zu 次 ===\n",
+	    g_delay_us, g_access.size(), g_writes.size());
+	int bad = 0;
+	if (g_bootargs.count("sweetadreno") == 0) {
+		int ok = g_access.empty();
+		printf("ASSERT no-mmio: %s\n", ok ? "ok" : "FAIL（没开开关却碰了 MMIO）");
+		bad |= !ok;
+	}
+	/* stage>=2 等同于 sweetadreno_power=1，会写寄存器；别把它算成只读路径 */
+	unsigned stage = g_bootargs.count("sweetadreno_stage") ? g_bootargs["sweetadreno_stage"] : 0;
+	if (((g_bootargs.count("sweetadreno_power") == 0 && stage < 2)) ||
+	    g_scenario == "prepowered" || g_scenario == "mapfail") {
+		int ok = g_writes.empty();
+		printf("ASSERT zero-writes: %s\n", ok ? "ok" : "FAIL（这条路径不该写寄存器）");
+		bad |= !ok;
+	}
+	if (getenv("K60_DUMP_WRITES")) {
+		for (auto &w : g_writes) printf("  write| %s\n", w.c_str());
+	}
+	return bad;
 }

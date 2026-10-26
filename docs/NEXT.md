@@ -63,3 +63,13 @@ git push https://x-access-token:$(cat ~/.config/gh-token)@github.com:443/XTOM070
 - 日志看 total 不看 seq；`ufslogsecs=1` 最多丢一秒
 - 整 MiB 块补丁不能用于可写 HFS
 - fastboot 不稳，用 TWRP 的 gzip 流式写入
+
+## 2026-10-26 第二轮（0181/0182，本地全绿）
+
+- 上游写集合逐条对上（48 次写一一对应），剩下的差异都在"判据"层，已修：
+  0181 预检 + 收尾验证；0182 分阶段 `sweetadreno_stage=1|2|3` + 五点寄存器快照。
+- 本地校验台 12 项全过：`cd k60-repo-full/tools/adreno-selftest && ./run.sh 0182`。
+  （含 prepowered / stuck / mapfail / 无 boot-arg / M1 零写 / GMU 模型 11 项）
+- GMU 偏移坑：`w*4-0x68000`，不是 `w*4`。
+- 待拍板：GMU 固件怎么进内核（A 嵌 C 数组 / B boot payload 段 / C 先不做），
+  建议 A。决定之前 M3 只能停在只读态。

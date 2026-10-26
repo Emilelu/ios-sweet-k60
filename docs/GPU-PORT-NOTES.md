@@ -153,3 +153,81 @@ CI 编出 0180 之后的内核。
 - xnu 只能在 macOS 上编：0179/0180 的最终编译确认要靠 CI（本轮没有推送任何远端）。
 - M3 之后（GMU 装载、ZAP 认证、CP 微码）全部是新地，上游自己也没确认过运行时。
 - 代理/Gitee 与本文件无关，见本轮汇报。
+
+## 8. 一次启动走完 M1–M4：分阶段诊断（0182）
+
+设备不是调试器，所以把阶段做成运行时参数，一次启动里累积执行、每段都留下判据行
+和同一组寄存器快照：
+
+| `sweetadreno_stage` | 做什么 | 关键判据行 | 失败停在哪 |
+|---|---|---|---|
+| 1（`sweetadreno=1` 默认） | 只读探测 gpucc/ao/gmu | `probe done` | 哪一段 `reading ...` 之后断了就是那块 |
+| 2（或 `sweetadreno_power=1`） | GPUCC 上电 + 收尾自检 | `GPUCC verified: n/7 branches running` | 停在最后一个 phase |
+| 3 | 只读判断 GMU 处在哪一步 | `GMU is held in reset` / `FW_INIT OK` / `HFI is up` | 只读，不会失败，只给状态 |
+
+快照在 `end-m1`、`pre-power`、`post-power-ok`、`post-power-fail`、`m3-readonly`
+五个点各打一遍，字段固定：`gdsc`（0x9108）、`hwctl`（0x953c）、`tcs`（0x9534）、
+`br0..br6`（七条 branch）、`gmu syreset/boot/finit/hfi`。任何阶段失败时，日志里
+已经有一份完整现场，不用回头补探针。
+
+## 9. GMU 寄存器偏移的陷阱（实证，会直接踩坏）
+
+上游 `gen7_reg.h` 里的 GMU 常量（`CM3_SYSRESET=0x1f800` 这种）**不是块内偏移**，
+是"以 kgsl 基址 `0x3d00000` 起的 dword 序号"，上游换算函数就是
+`offset(w) = w*4 - 0x68000`（0x68000 = GMU 基址 0x3d68000 − kgsl 基址 0x3d00000）。
+
+| 常量 | w | 块内偏移 `w*4-0x68000` | 绝对地址 |
+|---|---|---|---|
+| `CM3_SYSRESET` | 0x1f800 | 0x16000 | 0x3d7e000 |
+| `CM3_BOOT_CONFIG` | 0x1f801 | 0x16004 | 0x3d7e004 |
+| `CM3_FW_INIT_RESULT` | 0x1f81c | 0x16070 | 0x3d7e070 |
+| `HFI_CTRL_STATUS` | 0x1f980 | 0x16600 | 0x3d7e600 |
+
+若直接拿 `w*4` 当偏移（0x7e000）会读到 0x37000 的 GMU 窗口之外。0182 里统一用
+`SWEET_GMU_OFF()`，并且快照在越界前拒绝读。
+
+## 10. M3 预演：固件 + GMU 引导模型（`tools/adreno-selftest/gmu-model.c`）
+
+不是内核代码，是把 Pong 的计划逐步执行 + 一个按 gen7 语义写的最小 GMU 模型，
+跑的是**真固件**：
+
+```
+固件 gpu-fw/gmu_gen70000.bin：57272 字节
+  ok    TOC 解析 / 四个 payload 段 / ITCM 0x1dc + cache 0xdcac
+  ok    ITCM 首字是栈指针 0x10007f80（PC=0x105，落在 ITCM 段 0x1dc 内）
+  ok    BOOT_CONFIG=2 + 合法向量表 → 固件启动 → FW_INIT 0x100 → HFI 建立
+  ok    BOOT_CONFIG≠2 → 拒绝启动（对应上机看到的 FW_INIT 超时）
+  ok    截断固件 → 解析失败
+  ok    不在复位状态 → 拒绝重入（防止踩到已在跑的固件）
+11 项全过
+```
+
+**内核侧的 M3（真的写 ITCM/DTCM、`CM3_SYSRESET=0`、轮询 `FW_INIT`）还没实现**，
+它取决于 §12 那个「固件怎么进内核」的选择，所以这里只标 unverified。
+
+## 11. 证据台账
+
+| 结论 | 状态 | 证据/验证方法 |
+|---|---|---|
+| 五块 MMIO 地址与 DT reg 一致 | verified | `dump/live.dts` 逐条比对（§3 表） |
+| GPUCC 位域/偏移与 vendor 一致 | verified | 与 `PongAdrenoClocks.c` 逐项 diff |
+| 时钟序列**写集合**与上游一一对应 | verified | 仿真转储 48 次写，逐条比对上游 update 调用 |
+| 3 处时钟等待语义缺陷 | verified | 仿真 0179 三项 FAIL（§4 表） |
+| 0181 预检 + 收尾验证 | verified | 仿真 `prepowered` / `stuck` 两条路径 |
+| M1 不开开关时零 MMIO | verified | 仿真 `ASSERT no-mmio: ok` |
+| 映射失败不崩、只打印并返回 | verified | 仿真 `mapfail` 场景，0 次写 |
+| M1 只读全程零写寄存器 | verified | 仿真 `ASSERT zero-writes: ok` |
+| GMU 固件结构合法 | verified | 上游 `AdrenoFirmwarePlanGmu` 15 块 + 本地模型 11 项 |
+| GMU 引导寄存器序列 | **unverified**（模型层通过，内核未实现） | 实现 0183 后跑 `stage=3` + 仿真 |
+| 上游 A730「已跑通」 | **unverified** | 英文 README 说 command submission/Metal discovery，中文 README 一处说未确认、表格又打 ✅；无 CI、无 issue、无日志文件；本地仓是浅克隆，**提交历史不能当反证**。验证方法：要他们的日志/抓包，或自己上机复现 |
+| 任何真机寄存器读数 | **unverified** | 需要设备；判据见 §5、§8 |
+
+## 12. 需要拍板：GMU 固件怎么进内核（决定 M3 能否落地）
+
+固件 `gmu_gen70000.bin` 57,272 字节，内核要把它搬进 GMU 的 ITCM/DTCM。
+
+- A. 编成 C 数组随内核一起走（上游 Pong 就是这么干的）：一次刷机就够，补丁大 57KB；
+- B. 由 boot payload 追加一段、按 boot-arg 传物理地址：补丁干净，但要改 `mkpayload`/shim；
+- C. 先不做，M3 继续只读。
+
+建议 A：和上游同构、排错时不用对齐两套打包逻辑，代价只是仓库里多一个固件数组文件。

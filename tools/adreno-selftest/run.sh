@@ -40,9 +40,64 @@ run() {
 		fail=1
 	fi
 }
+# 无 boot-arg：一个 MMIO 都不许碰
+run_nobootarg() {
+	if grep -qF "ASSERT no-mmio: ok" <<<"$(cd "$HERE" && ./build/selftest happy "")"; then
+		echo "  ok   无 boot-arg（完全不碰 MMIO）"
+	else
+		echo "  FAIL 无 boot-arg 仍然碰了 MMIO"; fail=1
+	fi
+}
+
 run happy   "clock sequence returned 0"
 run hwcg    "clock sequence returned 0"
 run delayed "clock sequence returned 0"
 run busy    "update already pending, stopping"
+
+# 任意 boot-args 的跑法
+runx() {
+	local out
+	out=$(cd "$HERE" && ./build/selftest "$1" "$2" || true)
+	if grep -qF "$3" <<<"$out"; then
+		echo "  ok   $1[$2] → $3"
+	else
+		echo "  FAIL $1[$2]（没等到：$3）"
+		fail=1
+	fi
+}
+
+# 0181 起才有的路径：预检、收尾验证、映射失败、未开开关
+if grep -q 'sweet_adreno_preflight' "$HERE/build/SweetAdreno.cpp"; then
+	run prepowered "power domain already owned"
+	run stuck      "no branch reports running"
+	run mapfail    "MMIO mapping failed"
+	runx happy "sweetadreno=1,sweetadreno_stage=3" "GMU firmware has not reported FW_INIT OK"
+	runx gmulive "sweetadreno=1,sweetadreno_stage=3" "HFI is up"
+	run_nobootarg
+fi
+
+# M3 预演：真固件 + GMU 引导/失败分支模型（不是内核代码，见 gmu-model.c）
+echo "[gmu] 固件与 GMU 引导模型"
+if gcc -O1 -o "$HERE/build/gmu-model" "$HERE/gmu-model.c" 2>/dev/null; then
+	if FW=${K60_GMU_FW:-$HOME/hackios/gpu-fw/gmu_gen70000.bin}; [ -f "$FW" ]; then
+		if "$HERE/build/gmu-model" "$FW" > "$HERE/build/gmu-model.log" 2>&1; then
+			echo "  ok   GMU 模型 11 项（成功 + 3 条失败分支）"
+		else
+			echo "  FAIL GMU 模型，见 build/gmu-model.log"; fail=1
+		fi
+	else
+		echo "  FAIL 找不到固件 $FW"; fail=1
+	fi
+else
+	echo "  FAIL gmu-model.c 编译失败"; fail=1
+fi
+
+# M1（只开探测、不开上电）必须零写寄存器
+if grep -qF "ASSERT zero-writes: ok" <<<"$(cd "$HERE" && ./build/selftest happy "sweetadreno=1")"; then
+	echo "  ok   M1 只读（0 次写寄存器）"
+else
+	echo "  FAIL M1 路径写了寄存器"; fail=1
+fi
+
 echo
 exit $fail

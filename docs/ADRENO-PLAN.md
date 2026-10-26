@@ -84,3 +84,23 @@ fastboot boot <镜像，cmdline 带 sweetadreno=1 sweetadreno_power=1>
 - 探测顺序改为 gpucc → gmu_ao → gmu →（`sweetadreno_kgsl=1`）kgsl，
   免得一次 GX 域读挂死把前面的读数一起吞掉。
 - 构建时用 `K60_CMDLINE_EXTRA="sweetadreno=1"`，脚本已支持。
+
+## 2026-10-26 续：0181 / 0182（本地仿真验证，未上机）
+
+- `0181`：上电前做只读预检（GDSC / 0x953c / 七条 branch），固件已占电源域就一个
+  寄存器都不写；`GPUCC up` 改为先读回七条 branch 再宣布，`0/7` 判失败。
+- `0182`：`sweetadreno_stage=1|2|3` 一次启动累积执行 M1→M2→M3 只读态；五个快照点
+  （`end-m1`/`pre-power`/`post-power-ok`/`post-power-fail`/`m3-readonly`）打印同一组
+  寄存器，失败现场自带。
+- GMU 偏移必须用 `w*4-0x68000`，别用 `w*4`（会读到窗口外）。
+- M3 预演：`tools/adreno-selftest/gmu-model.c` 用真固件跑通成功 + 3 条失败分支，
+  共 11 项。内核侧固件装载仍未实现，卡在「固件怎么进内核」的选择上。
+
+上机时的推荐顺序（一次刷机、一次启动尽量往后走）：
+
+```
+fastboot boot <带 0182 的内核镜像，cmdline 加 sweetadreno=1 sweetadreno_stage=3>
+# 一轮里依次看：probe done → GPUCC verified → GMU 状态三段
+# 若 GPUCC 直接 "GDSC is owned by firmware"，说明 bootloader 已上电，
+#   看 preflight n/7 决定是不是直接进 M3
+```
