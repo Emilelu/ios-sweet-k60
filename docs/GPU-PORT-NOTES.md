@@ -230,6 +230,35 @@ CI 编出 0180 之后的内核。
 | GMU 引导寄存器序列 | **unverified**（模型层通过，内核未实现） | 实现 0183 后跑 `stage=3` + 仿真 |
 | 上游 A730「已跑通」 | **unverified** | 英文 README 说 command submission/Metal discovery，中文 README 一处说未确认、表格又打 ✅；无 CI、无 issue、无日志文件；本地仓是浅克隆，**提交历史不能当反证**。验证方法：要他们的日志/抓包，或自己上机复现 |
 | 任何真机寄存器读数 | **unverified** | 需要设备；判据见 §5、§8 |
+| CI 首次构建失败原因 | verified | `nm -u` 证据：0182 的对象引用 `_Z5delayi`/`_Z9ml_io_mapmm`，内核里叫 `delay`/`ml_io_map`；0183 变成未修饰名。CI run 40275117403 的 build 步骤 7m05s 失败 |
+| 0183 修复后本地全绿 | verified | `./run.sh 0183` 12/12；链接期守卫把 0182 直接判 FAIL |
+
+## 11.1 第一次 CI 失败：C++ 名字修饰（已修，0183）
+
+`iokitcpp` 这一档是按 C++ 编的。文件里原来写的是
+
+```c
+extern vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size);
+extern void delay(int us);
+```
+
+C++ 下这两个会变成 `_Z9ml_io_mapmm` / `_Z5delayi`，而内核导出的是 C 符号
+`ml_io_map` / `delay`，链接期找不到。其它 Sweet 文件里调用 C 代码都包了
+`extern "C"`，这个驱动漏了。
+
+本地复现（不靠猜）：
+
+```
+$ nm -u sa-0182.o | grep -E 'ml_io_map|delay'
+                 U _Z5delayi
+                 U _Z9ml_io_mapmm
+$ nm -u sa-0183.o | grep -E 'ml_io_map|delay'
+                 U delay
+                 U ml_io_map
+```
+
+0183 把两行包进 `extern "C" { }`；校验台新增链接期守卫：只要未定义符号里还有
+`_Z` 修饰名（运行期的 `_Zd*`/`_Zn*` 除外）就直接 FAIL，防止同类问题再推到 CI。
 
 ## 12. 需要拍板：GMU 固件怎么进内核（决定 M3 能否落地）
 
