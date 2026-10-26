@@ -1,0 +1,155 @@
+# GPU 移植笔记（2026-10-26 离线轮）
+
+本机没有设备，也没有 macOS，所以这一轮只做三件事：读上游、本地编译/仿真校验、
+把上机判据写死。**没有上机，没有推送任何远端。**
+
+## 0. 一句话结论
+
+`0179` 的寄存器地址/位域是对的，但时钟等待有 3 处与 vendor 语义不符（会在正常
+硬件上误报失败），只读探测还先读了最可能挂死的 GX 域。已写成 `0180` 修正，
+并在本地仿真台上验证（见 §4）。M1 的验收判据里「chipid 0x7030002」是文档错误：
+它是 DT 常量，不是寄存器，代码永远打不出硬件读到的 chipid。
+
+## 1. 参考仓
+
+| 仓 | 提交 | 本地位置 | 内容 |
+|---|---|---|---|
+| `UniXNU/UniXNU` | `ae68700` | 稀疏克隆（drivers,PongAdreno/docs/userland，4.7 MB） | 框架 + 新代际：`drivers/Adreno740`、`drivers/AdrenoMetal`、`docs/zh/porting/gpu.md` |
+| `Chengdong-Yu/UniXNU-pong` | `ab74f07` | `~/hackios/refs/UniXNU-pong`（完整） | 同 SM8475 的板级实现 `drivers/PongAdreno`（2781 行） |
+
+⚠ 上游文档自相矛盾：`docs/zh/devices/pong.md` 写「Adreno 730 硬件加速与 Metal
+已接通」，英文 `docs/devices/pong.md` 写「hardware acceleration is not confirmed」。
+按英文和 README 为准——**未确认**。别把中文那句当既有成果。
+
+## 2. 四层对照：对 K60 能搬什么
+
+| 层 | 上游载体 | 对 K60（A730/gen7-4-0）的结论 |
+|---|---|---|
+| 内核 AGX 提交 ABI | `PongAdreno/submit/`：`NativeAdrenoABI.h`、`AdrenoPM4.c/h`、`NativeAdrenoClient/Vm/GmuPlatform/GmuMemory/*`（1667 行） | **可搬，但要改**。chip_id 就是 `0x07030002`（`PongAdrenoGmu.h`），和 K60 的 `qcom,chipid` 一致；PM4 包与 BO/VA 生命周期是通用 gen7。改动：`pong_` 前缀/ramoops 诊断换成我们的 `Sweet*`；服务发布要接到 `IOAcceleratorES`（我们 0178 的空壳正好当挂点）；它假设 GMU 已起，顺序必须排在我们 M3 之后 |
+| 板级层 PongAdreno | `PongAdrenoPower.c`、`PongAdrenoClocks.c`、`PongAdrenoGmu.c`、`PongAdrenoZap.c`、`PongAdrenoCp*.cpp` | **能直接当参考实现**。Cape GPUCC 寄存器/位域与我们完全同源（逐条比对见 §3）；`PongAdrenoClocks.c` 就是 `SweetAdreno` 上电序列的出处。GMU 三段区域 `{0,0x4000,1},{0x4000,0xffc000,2},{0x10004000,0x4000,3}`、RSCC/PDC 序列可直接照抄 |
+| 用户态 metal2vulkan + Turnip | 不在 `UniXNU-pong` 里；`UniXNU` 的 `AdrenoMetal` + `scripts/build-turnip-darwin.py` + `.cache/mesa-work` | **不能直接搬**。它是「自己编 Turnip + 自研 metal2vulkan」的构建产物层，且面向 A740；A730 要先有内核 kmd 与 fence，才谈前端。属 M4 之后 |
+| 只读 union 注入 | `userland/`（`init.c`、`libmini`、`ui_compat.c`）+ `pong-payload.patch` | **不需要**。那是它们自己的 userland 引导方式；我们已经有 shim + HFSX 真根 + launchd 跑起来了，照搬反而会丢掉现有成果 |
+
+## 3. 0179 骨架核对（逐项，有出处）
+
+地址全部取自 `dump/live.dts`（不是文档抄的）：
+
+| 块 | 我们的宏 | DT reg | 判定 |
+|---|---|---|---|
+| kgsl | `0x3d00000` / `0x40000` | `qcom,kgsl-3d0@3d00000` reg[0] | ✓ |
+| gmu | `0x3d68000` / `0x37000` | `qcom,gmu@3d69000` reg[0]，**节点名写 3d69000、reg 却是 3d68000** | ✓（按 reg，不按节点名） |
+| gmu_ao_blk_dec0 | `0x3d40000` / `0x10000` | 同节点 reg[2] | ✓ |
+| gpucc | `0x3d90000` / `0x10000` | `clock-controller@3d90000` | ✓（上游只用前 `0xa000`） |
+| gcc | `0x100000` / `0x1f4200` | 上游同值 | ✓ |
+
+位域：GDSC `0x9108` mask `0xf007` / `0x8000`，状态 `0x953c` bit31；PLL 两组
+`LUCID_OLE` 的 9 个偏移 `{0x10,0x14,0x20,0x24,0x28,0x1c,0x30,0x34,0x38}` 与值表；
+root mux cfg `0x100602/0x100603/0x100001` + mask `0x10371f`；7 条 branch
+`{0x9004,0x9144,0x93e8,0x913c,0x9148,0x911c,0x7000}`；3 条 root
+`{0x9318,0x93ec,0x9010}`；`0x9534` 清零——**与 `PongAdrenoClocks.c` 逐字一致**。
+
+### 命题不成立的三处（仿真已复现）
+
+| # | 0179 的写法 | vendor/上游语义 | 后果 |
+|---|---|---|---|
+| 1 | GCC `0x81004` 也去等 CLK_OFF(bit31) 清零 | HWCG 模式下 bit31 保持置位、且 `bits0..1==3` 即视为已开 | 健康硬件被判 `halted`，M2 直接中止 |
+| 2 | GPUCC `0x911c` 也去 poll | vendor 把它标为 delayed：使能后只等 10us，**不 poll** | 同上，误报 halted |
+| 3 | root mux 不看 update 位就写 | update 位仍置位时不得重配（会静默丢配置） | 速率配置被吞，时钟跑错频 |
+
+另有一处**顺序**问题：0179 先读 kgsl（GX 域，GDSC 关着时读它，NoC 可能直接挂死
+且无任何输出），再读 gmu/gpucc/ao。一次读挂死就什么都拿不到。
+
+### `0180` 的改动
+
+- 抽出 `sweet_adreno_branch(blk, off, delayed)`，三段语义一次说清（CLK_OFF 清 /
+  NOC FSM `0x2...` / HWCG 3 / delayed 不 poll）。
+- root mux 写入前检查 update 位，命中就停下并打印。
+- 探测顺序改为 gpucc → gmu_ao → gmu →（`sweetadreno_kgsl=1` 才读）kgsl，每段先打
+  一行「要读哪个块」，挂了也知道挂在哪。
+- 日志里明确写出 chipid 是 DT 常量。
+- M1 路径依旧**零写寄存器**；上电序列仍只在 `sweetadreno_power=1` 下跑。
+
+## 4. 本地校验方法（可复跑）
+
+`tools/adreno-selftest/`（已并入补丁仓库）：把补丁里的 `SweetAdreno.cpp` 原样编译，
+`ml_io_map()` 返回一块假寄存器文件，寄存器行为（CLK_OFF、GDSC 状态位、mux update）
+用 hook 模拟。
+
+```
+cd tools/adreno-selftest
+# A. 按真实架构编译（保住 dsb sy 内联汇编）
+clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I stubs -ffreestanding \
+        -fno-exceptions -fno-rtti -c build/SweetAdreno.cpp -o /tmp/a.o
+# B. x86 仿真（只把 dsb 屏障与裸指针访问换成函数）
+./run.sh 0179   # 旧版
+./run.sh 0180   # 新版
+```
+
+实测结果（`0180` 已全绿）：
+
+| 场景 | 0179 | 0180 |
+|---|---|---|
+| happy | `clock sequence returned 0` | 同 |
+| HWCG（0x81004 保持 bit31、bits=3） | `GCC branch 0x81004 halted (0xa0000003)` | `GPUCC up` |
+| delayed（0x911c 不清 CLK_OFF） | `branch 0x911c halted (0xa0000000)` | `GPUCC up` |
+| busy（0x9318 update 位残留） | 继续写 mux（静默丢配置） | `root mux 0x9318 update already pending, stopping` |
+
+附带证据：`gpu-fw/gmu_gen70000.bin`（57,272 字节）用上游 `AdrenoFirmwarePlanGmu`
++ A730 的三段区域解析，返回 success、15 个块，ITCM 段 0x1dc、0x4000 段 0xdcac、
+`0x10007f98`/`0x10007fdc` 两个数据块都在——M3 的固件输入是结构合法的。
+
+## 5. M1 上机判据（设备回来照这个看）
+
+启动参数只加 `sweetadreno=1`（不加 `_power`，M1 全程不写寄存器）。
+
+| 日志 | 通过条件 | 不通过说明什么 |
+|---|---|---|
+| `SWEET ADRENO: maps gpucc=… ao=… gmu=…` | 三个都非 0 | 有 0 = `ml_io_map` 失败：地址不在 physmap/ADT 覆盖内 |
+| `reading gpucc (CX domain, safe)` + 4 行 `gpucc[i]` | 能打完 4 行 | 卡死/重启 = GPUCC 也在被关断的电源域，M2 必须先做 GDSC 再读 |
+| `gpucc[i]` 的值 | 不是全 `0xffffffff` | 全 `0xffffffff` = 该块无时钟/NoC slave error；全 0 = 未上电或 XPU 挡 |
+| `reading gmu_ao_blk_dec0` + 4 行 `ao[i]` | 能打完 | 卡死 = AO 域假设错了，回头看 DT 的 reg[2] |
+| `reading gmu (may need CX's GDSC)` + 4 行 `gmu[i]` | 能打完 | 卡死在这里 = GMU 需要 GDSC/时钟，M2 顺序要调整 |
+| `chipid is the DT constant 0x7030002 …` | 出现即可 | 这只是说明行，**不要**当硬件读到的 chipid |
+| `kgsl read skipped` | 正常 | 想冒险读 GX 域再加 `sweetadreno_kgsl=1` |
+| `SWEET ADRENO: probe done` | 出现 = **M1 通过** | 没出现 = 上面某一行之后断了，按断点定位 |
+
+M1 通过后：`SWEET ADRENO: probe done` 之后再加 `sweetadreno_power=1` 看停在哪个
+phase；`GPUCC up` = 时钟全开，可以进 M3（GMU 固件装载）。
+若 M2 打的是 `GDSC already owned by hardware, stopping`，那是 bootloader 已经开过
+GDSC 的好消息，别当成失败，直接往 M3 排。
+
+## 6. 构建命令（已在本机跑通一次）
+
+```
+cd ~/hackios
+# 内核换成交付的那颗（含 0179/0180），cmdline 追加 sweetadreno=1
+K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_verbose=1" \
+  ./tools/k60-build-boot.sh artifacts/kernel.development.sweet artifacts/xnu-adreno.img
+fastboot boot artifacts/xnu-adreno.img      # M1 只读，风险低
+./tools/k60-log-pull.sh                     # TWRP 里拉日志环
+```
+
+手工三步（脚本内部就是这三段，需要绕开脚本时用）：
+
+```
+ADT_PHYS_BASE=0xb4000000 ADT_MEM_SIZE=0x2c000000 \
+  python3 ios-sweet/tools/mkadt.py /tmp/k60.adt --k60
+python3 ios-sweet/tools/mkpayload.py <kernel> /tmp/k60.adt /tmp/k60-payload.bin \
+  --cmdline "debug=0x8 keepsyms=1 cpus=8 -noprogress serial=1 sweet_notests=1 \
+rd=ufsroot0 ufsroot=userdata ufsrw=1 amfi_get_out_of_my_way=1 \
+cs_enforcement_disable=1 amfi_allow_any_signature=1 ufslogsecs=5 \
+sweetadreno=1 sweetadreno_verbose=1"
+cd ios-sweet/shim && HDRVER=4 CFLAGS_EXTRA="-DK60_XNULOG -DK60_NO_PHYSMAP_EXT" \
+  PAYLOAD=/tmp/k60-payload.bin ./build.sh && cp out/shim-boot.img /tmp/xnu-adreno.img
+```
+
+本轮验证产物：`artifacts/xnu-adreno-cmd.img`（16,891,904 字节），镜像内 cmdline 实测含
+`… ufslogsecs=5 sweetadreno=1 sweetadreno_verbose=1`。**注意它用的是现有
+`kernel-accel.sweet`，不含 Adreno 代码**，只用来证明打包链路可用；真正要刷的必须是
+CI 编出 0180 之后的内核。
+
+## 7. 还缺什么
+
+- xnu 只能在 macOS 上编：0179/0180 的最终编译确认要靠 CI（本轮没有推送任何远端）。
+- M3 之后（GMU 装载、ZAP 认证、CP 微码）全部是新地，上游自己也没确认过运行时。
+- 代理/Gitee 与本文件无关，见本轮汇报。
