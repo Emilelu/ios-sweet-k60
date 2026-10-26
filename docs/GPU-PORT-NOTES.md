@@ -344,6 +344,20 @@ if (priv == PRIV_WORK_INTERVAL) return 0;
 可选处理（待定，见 §15）：A 补一个对上当前树的授权补丁并删掉 0168；B 只删 0168，
 保持当前已验过的 deny-all；C 不动，仅在文档标注。
 
+### 14.1 日志尾巴拿不到（记录在案，不阻塞）
+
+两种协议都在 ~4MB 处被掐断，说明是链路/服务端对流长度的限制，不是 curl 参数问题：
+
+```
+HTTP/2: curl: (92) HTTP/2 stream 1 reset by server (error 0x8 CANCEL)   4,034,712 字节处
+HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading   3,999,387 字节处
+```
+
+所以 `05:53:52` 那一刻（Build 失败点）的原文这一侧拿不到。可用的替代：
+在有高速链路的机器上 `gh run view 40276193603 --log-failed`，或开 FlClash 后重跑
+（本机当前 7890 未监听、无 TUN）。**不需要它也能继续**：内核产物已 `NOUNDEFS` 且含
+0181/0182 字符串，说明失败发生在内核产出之后。
+
 ## 15. 待拍板清单（2026-10-26 收尾）
 
 | # | 事项 | 选项 | 建议 |
