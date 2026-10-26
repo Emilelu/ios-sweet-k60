@@ -21,6 +21,33 @@ _head:
 _start:
 	msr	daifset, #0xf
 	mov	x19, x0			/* DTB pointer from ABL */
+
+	/*
+	 * ABL hands off at EL2 on this SoC. XNU expects EL1: at EL2 the
+	 * generic-timer registers CNTP_ and CNTV_ forms are UNDEFINED because these
+	 * cores have no VHE (HCR_EL2.E2H is always 0), so the very first
+	 * "msr CNTP_CTL_EL0, x8" in _fiq_context_init took an undefined
+	 * instruction panic. Drop to EL1 before doing anything else.
+	 */
+	mrs	x0, CurrentEL
+	ubfx	x0, x0, #2, #2
+	cmp	x0, #2
+	b.ne	9f
+	/* HCR_EL2.RW = 1: EL1 is AArch64, and trap nothing else */
+	movz	x0, #0x8000, lsl #16	/* HCR_EL2.RW */
+	msr	hcr_el2, x0
+	/* allow EL1 to use the physical timer/counter */
+	mov	x0, #3
+	msr	cnthctl_el2, x0
+	msr	cntvoff_el2, xzr
+	/* return to EL1h with interrupts masked */
+	mov	x0, #0x3c5
+	msr	spsr_el2, x0
+	adr	x0, 9f
+	msr	elr_el2, x0
+	isb
+	eret
+9:
 	msr	spsel, #1
 	adr	x1, _stack_top
 	mov	sp, x1

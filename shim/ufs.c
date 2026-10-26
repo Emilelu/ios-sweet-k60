@@ -27,6 +27,13 @@
 #define REG_UTRLCLR	0x5c
 #define REG_UTRLRSR	0x60
 
+#define REG_UICCMD	0x90
+#define REG_UICCMDARG1	0x94
+#define REG_UICCMDARG2	0x98
+#define REG_UICCMDARG3	0x9c
+#define IS_UCCS		(1u << 10)	/* UIC command completion status */
+#define UIC_DME_LINKSTARTUP	0x16
+
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
 #define HCS_UCRDY	(1u << 3)
@@ -57,9 +64,20 @@ struct ucd {
 	} prdt[1];
 };
 
-static struct utrd utrl[32] __attribute__((aligned(1024)));
-static struct ucd ucd __attribute__((aligned(128)));
-static uint8_t data[2 * BLOCK] __attribute__((aligned(4096)));
+/* All UFS DMA buffers live in the reserved cont_splash_region at 0xb8000000:
+ * the host has no 64-bit DMA (CAP.64AS=0) and the kernel image may be loaded
+ * above 4 GiB, which is why a request-list base inside .bss was rejected. */
+#define UFS_LOW_BASE	0xb8000000UL
+#define UFS_LOW_UTRL	(UFS_LOW_BASE + 0x0000UL)	/* 32 descriptors, 1 KiB */
+#define UFS_LOW_UCD	(UFS_LOW_BASE + 0x1000UL)	/* command descriptor  */
+#define UFS_LOW_DATA	(UFS_LOW_BASE + 0x2000UL)	/* 8 KiB bounce buffer */
+#define UFS_LOW_ENTS	(UFS_LOW_BASE + 0x4000UL)	/* 16 KiB GPT entries  */
+
+/* Macros keep the existing "utrl[0]" / "ucd.cmd" / "data" spellings working
+ * while the storage sits in the low reserved region. */
+#define utrl	((struct utrd *)UFS_LOW_UTRL)
+#define ucd	(*(struct ucd *)UFS_LOW_UCD)
+#define data	((uint8_t *)UFS_LOW_DATA)
 
 static uint64_t ticks(void)
 {
@@ -135,7 +153,10 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	*ocs_out = utrl[0].dw2 & 0xff;
-	*status_out = ucd.resp[7];		/* SCSI status in the response UPIU */
+	*status_out = ucd.resp[7];
+	ufs_scsi_ocs = (int)*ocs_out;
+	for (int i = 0; i < 20; i++)
+		ufs_sense[i] = ucd.resp[32 + i];		/* SCSI status in the response UPIU */
 	if (*ocs_out)
 		return 2;
 	if (ucd.resp[0] != 0x21)		/* RESPONSE UPIU */
@@ -146,8 +167,9 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
 	uint8_t cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
-	uint32_t ocs, st;
-	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st, 1);
+	uint32_t ocs, st, rc = scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st, 1);
+	ufs_scsi_rc = (int)rc;
+	return rc;
 }
 
 static uint32_t write_blocks(uint32_t lba, uint32_t count, const void *buf)
@@ -184,7 +206,8 @@ static const char *fs_type(uint32_t lba)
 /* One line per GPT entry of at least 64 MiB: name, first LBA, size in MiB (4K blocks). */
 static void list_partitions(uint32_t entry_lba, uint32_t nent)
 {
-	static uint8_t ents[128 * 128] __attribute__((aligned(4096)));
+	static uint8_t *const ents = (uint8_t *)UFS_LOW_ENTS;
+	(void)0;
 	uint32_t blocks = (nent * 128 + BLOCK - 1) / BLOCK;
 	if (read_blocks(entry_lba, blocks, ents)) {
 		con_str("UFS PART", "read error");
@@ -294,38 +317,33 @@ void test_ufs(void)
  * ===================================================================== */
 
 static int host_up;
+int ufs_scsi_rc;	/* last scsi() status: 0 ok, 1 timeout, 2 OCS, 3 bad resp, 4 SCSI status */
+int ufs_scsi_ocs;
+uint8_t ufs_sense[20];	/* sense data from the last failed command (resp UPIU + 32) */
+uint32_t ufs_cap_post, ufs_ver_post;	/* read after HCE + link up */
+int ufs_host_init(void);	/* defined below: full UFSHCI bring-up */
 
 /* Point the transfer request list at our own descriptors. Idempotent. */
-static int ufs_take_over(void)
+int ufs_take_over(void)
 {
 	if (host_up)
 		return 0;
-	if (!(ufs_rd(REG_HCE) & 1) || !(ufs_rd(REG_HCS) & HCS_DP) || !(ufs_rd(REG_HCS) & HCS_UTRLRDY))
-		return 1;
-	/* Polled operation: kill interrupts and drop any latched status, exactly
-	 * like the XNU driver does. The bootloader may also leave a request
-	 * ringing in the doorbell; clear it instead of giving up. */
-	ufs_wr(REG_IE, 0);
-	ufs_wr(REG_IS, ufs_rd(REG_IS));
-	uint32_t dbr = ufs_rd(REG_UTRLDBR);
-	if (dbr)
-		ufs_wr(REG_UTRLCLR, dbr);
-	ufs_wr(REG_UTRLRSR, 0);
-	uintptr_t list = (uintptr_t)utrl;
-	ufs_wr(REG_UTRLBA, (uint32_t)list);
-	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
-	ufs_wr(REG_UTRLRSR, 1);
-	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
-	    !(ufs_rd(REG_UTRLRSR) & 1))
-		return 3;
-	host_up = 1;
-	return 0;
+	/* The bootloader leaves the UFS block unpowered and unclocked, so power it
+	 * up through GCC first; stage 10 means that step failed. */
+	{
+		int grc = gcc_ufs_bring_up();
+		if (grc)
+			return 10 + grc;	/* 11..18 */
+	}
+	/* then a real UFSHCI bring-up: UCRDY -> HCE -> DME_LINKSTARTUP -> queues */
+	return ufs_host_init();
 }
 
 /* Find a GPT entry by name; returns 0 and the extent on success. */
 static int gpt_find(const char *want, uint32_t *first_lba, uint32_t *nblocks)
 {
-	static uint8_t ents[128 * 128] __attribute__((aligned(4096)));
+	static uint8_t *const ents = (uint8_t *)UFS_LOW_ENTS;
+	(void)0;
 	static uint8_t hdr[BLOCK] __attribute__((aligned(4096)));
 
 	if (read_blocks(1, 1, hdr))
@@ -470,4 +488,627 @@ int ufs_part_first(const char *name, uint32_t *first)
 int ufs_probe_read(uint32_t lba, void *buf)
 {
 	return (int)read_blocks(lba, 1, buf);
+}
+
+/* =====================================================================
+ * UFSHCI bring-up from scratch (the K60's ABL does not leave the host in a
+ * state we can inherit: HCE may be off and the UniPro link down).
+ * Returns 0 on success, or a stage code 1..6 describing where it stopped.
+ * ===================================================================== */
+
+static int wait_set(uint32_t reg, uint32_t mask, unsigned spins)
+{
+	while (spins--) {
+		if (ufs_rd(reg) & mask)
+			return 1;
+	}
+	return 0;
+}
+
+int ufs_host_init(void)
+{
+	/* 1. controller ready */
+	if (!wait_set(REG_HCS, HCS_UCRDY, 2000000))
+		return 1;
+	/* 2. no interrupts, clear latched status */
+	ufs_wr(REG_IE, 0);
+	ufs_wr(REG_IS, ufs_rd(REG_IS));
+	/* 3. host controller enable */
+	if (!(ufs_rd(REG_HCE) & 1u)) {
+		ufs_wr(REG_HCE, 1);
+		if (!wait_set(REG_HCE, 1u, 2000000))
+			return 2;
+	}
+	/* snapshot as soon as the controller is enabled: CAP/VER are only
+	 * meaningful with HCE on, and we want them even if a later step fails */
+	ufs_cap_post = ufs_rd(REG_CAP);
+	ufs_ver_post = ufs_rd(REG_VER);
+
+	/* 4. UniPro link start-up: DME_LINKSTARTUP via the UIC mailbox */
+	ufs_wr(REG_UICCMDARG1, 0);
+	ufs_wr(REG_UICCMDARG2, 0);
+	ufs_wr(REG_UICCMDARG3, 0);
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UICCMD, UIC_DME_LINKSTARTUP);
+	/* 5. wait for the UIC completion bit */
+	if (!wait_set(REG_IS, IS_UCCS, 2000000))
+		return 3;
+	ufs_wr(REG_IS, IS_UCCS);
+	/* 6. result code in UICCMDARG2[23:16], then the data-present bit */
+	if ((ufs_rd(REG_UICCMDARG2) >> 16) & 0xffu)
+		return 4;
+	if (!(ufs_rd(REG_HCS) & HCS_DP))
+		return 5;
+	/* 7. transfer request list: stop, point at ours */
+	ufs_wr(REG_UTRLRSR, 0);
+	uintptr_t list = (uintptr_t)utrl;
+	ufs_wr(REG_UTRLBA, (uint32_t)list);
+	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UTRLRSR, 1);
+	/* the run-stop bit and the base register need a moment to settle */
+	if (!wait_set(REG_UTRLRSR, 1u, 2000000))
+		return 6;
+	if (ufs_rd(REG_UTRLBA) != (uint32_t)list)
+		return 7;
+	host_up = 1;
+	return 0;
+}
+
+/* Small accessors for the bring-up probes in shim.c. */
+uint32_t ufs_reg_read(uint32_t off)
+{
+	return ufs_rd(off);
+}
+
+int ufs_utrl_base_matches(void)
+{
+	return ufs_rd(REG_UTRLBA) == (uint32_t)(uintptr_t)utrl && ufs_rd(REG_UTRLBA) != 0;
+}
+
+/* =====================================================================
+ * GCC-side bring-up for the UFS subsystem.
+ *
+ * After the ABL hands over, the UFS block is unclocked and unpowered, so its
+ * registers read back as zero (Q43). Enable the PHY power domain and the
+ * clocks that the Android driver has on in clk_summary, then the UFSHCI
+ * register block becomes readable again.
+ * Offsets from the upstream drivers/clk/qcom/gcc-sm8450.c.
+ * ===================================================================== */
+#define GCC_BASE		0x00100000UL
+#define GCC_GDSCR(g)		(GCC_BASE + (g))
+#define UFS_PHY_GDSCR		0x87004UL
+
+static volatile uint32_t *gcc_reg(uint32_t off)
+{
+	return (volatile uint32_t *)(GCC_BASE + off);
+}
+
+/* Every GCC register we touch is snapshotted so the probe can put it back
+ * before resetting. Without this the warm reset keeps our clock settings and
+ * the next Android boot comes up with a half-configured display/clock tree
+ * (observed as "screen lights up then goes black"). */
+static struct { uint32_t off, orig; } gcc_saved[16];
+static int gcc_nsaved;
+
+static void gcc_note(uint32_t off)
+{
+	for (int i = 0; i < gcc_nsaved; i++)
+		if (gcc_saved[i].off == off)
+			return;
+	if (gcc_nsaved < 16) {
+		gcc_saved[gcc_nsaved].off = off;
+		gcc_saved[gcc_nsaved].orig = *gcc_reg(off);
+		gcc_nsaved++;
+	}
+}
+
+void gcc_restore(void)
+{
+	for (int i = 0; i < gcc_nsaved; i++)
+		*gcc_reg(gcc_saved[i].off) = gcc_saved[i].orig;
+	__asm__ volatile("dsb sy" ::: "memory");
+	gcc_nsaved = 0;
+}
+
+static int gcc_clk_on(uint32_t off)
+{
+	uint32_t v;
+
+	gcc_note(off);
+	v = *gcc_reg(off);
+	*gcc_reg(off) = v | 1u;
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (int i = 0; i < 500000; i++)
+		if (*gcc_reg(off) & 1u)
+			return 0;
+	return 1;
+}
+
+int gcc_ufs_bring_up(void)
+{
+	/* 1. PHY power domain */
+	gcc_note(UFS_PHY_GDSCR);
+	uint32_t g = *gcc_reg(UFS_PHY_GDSCR);
+	if (!(g & (1u << 31))) {
+		uint32_t v = g & ~1u;
+		v |= 0xfu << 20;
+		v |= 0xfu << 16;
+		v |= 0xfu << 12;
+		v &= ~(1u << 4);
+		*gcc_reg(UFS_PHY_GDSCR) = v;
+		__asm__ volatile("dsb sy" ::: "memory");
+		for (int i = 0; i < 500000; i++) {
+			if (*gcc_reg(UFS_PHY_GDSCR) & (1u << 31))
+				break;
+		}
+	}
+	/* 2. the clocks clk_summary shows enabled on a running Android */
+	if (gcc_clk_on(0x9c000))	/* gcc_ufs_0_clkref_en */
+		return 2;
+	if (gcc_clk_on(0x87020))	/* gcc_ufs_phy_ahb_clk */
+		return 3;
+	if (gcc_clk_on(0x87018))	/* gcc_ufs_phy_axi_clk */
+		return 4;
+	if (gcc_clk_on(0x87064))	/* gcc_ufs_phy_unipro_core_clk */
+		return 5;
+	if (gcc_clk_on(0x870a4))	/* gcc_ufs_phy_phy_aux_clk */
+		return 6;
+	if (gcc_clk_on(0x8706c))	/* gcc_ufs_phy_ice_core_clk */
+		return 7;
+	if (gcc_clk_on(0x87024))	/* gcc_ufs_phy_tx_symbol_0_clk */
+		return 8;
+	return 0;
+}
+
+int gcc_ufs_gdsc_on(void)
+{
+	return (int)((*gcc_reg(UFS_PHY_GDSCR) >> 31) & 1);
+}
+
+/* Read one 4 KiB block into the low-DMA bounce buffer (0xb8002000) and hand a
+ * pointer back, so callers never pass a high (non-DMA-able) buffer. */
+int ufs_read_lowblk(uint32_t lba)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+	int rc;
+
+	/* After a power-up the first command usually comes back with UNIT
+	 * ATTENTION; clear it with a few TEST UNIT READY attempts. */
+	for (int i = 0; i < 5; i++) {
+		rc = (int)scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+		if (!rc && st == 0)
+			break;
+	}
+	/* then the real read, retried with a small settle time between attempts */
+	for (int i = 0; i < 8; i++) {
+		rc = (int)read_blocks(lba, 1, data);
+		if (!rc)
+			break;
+		volatile unsigned spin = 2000000;
+		while (spin--)
+			;
+	}
+	ufs_scsi_rc = rc;
+	return rc;
+}
+
+const uint8_t *ufs_bounce(void)
+{
+	return data;
+}
+
+/* READ CAPACITY(10): returns 0 on success; *lastlba / *blk are filled. */
+int ufs_readcap(uint32_t *lastlba, uint32_t *blk)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	static const uint8_t cap10[10] = { 0x25 };
+	uint32_t ocs = 0, st = 0;
+	int rc;
+
+	for (int i = 0; i < 5; i++) {
+		rc = (int)scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+		if (!rc && st == 0)
+			break;
+	}
+	rc = (int)scsi(0, cap10, sizeof(cap10), data, 8, &ocs, &st, 1);
+	ufs_scsi_rc = rc;
+	if (rc)
+		return rc;
+	uint32_t l = 0, b = 0;
+	for (int i = 0; i < 4; i++) {
+		l = (l << 8) | data[i];
+		b = (b << 8) | data[4 + i];
+	}
+	*lastlba = l;
+	*blk = b;
+	return 0;
+}
+
+/* Single READ(10) attempt, no TUR prelude and no retries (control test). */
+int ufs_read1(uint32_t lba)
+{
+	int rc = (int)read_blocks(lba, 1, data);
+	ufs_scsi_rc = rc;
+	return rc;
+}
+
+/* UFS LUs report NOT READY (sense key 2) for a while after power-up; poll
+ * TEST UNIT READY with a settle time between attempts. */
+static void ufs_spin(unsigned n)
+{
+	volatile unsigned x = 0;
+	while (n--)
+		x++;
+}
+
+int ufs_wait_ready(void)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+	int rc = 1;
+
+	for (int i = 0; i < 250; i++) {
+		rc = (int)scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+		if (rc == 0 && st == 0)
+			return 0;
+		ufs_spin(400000);	/* tens of ms */
+	}
+	return rc ? rc : 4;
+}
+
+/* Probe each LU for readiness. Returns the first ready LUN, or -1. */
+int ufs_find_ready_lun(void)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+
+	for (int lun = 0; lun < 6; lun++) {
+		for (int i = 0; i < 25; i++) {
+			int rc = (int)scsi((uint8_t)lun, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+			if (rc == 0 && st == 0)
+				return lun;
+			ufs_spin(300000);
+		}
+	}
+	return -1;
+}
+
+/* START STOP UNIT with START=1 and power condition 0 (active): wakes the LU. */
+int ufs_ssu(uint8_t lun)
+{
+	static const uint8_t cdb[6] = { 0x1b, 0, 0, 0, 0x01, 0x00 };
+	uint32_t ocs = 0, st = 0;
+	int rc = (int)scsi(lun, cdb, sizeof(cdb), 0, 0, &ocs, &st, 0);
+	ufs_scsi_rc = rc;
+	return rc;
+}
+
+/* Wake every LU and report the first one that answers TEST UNIT READY. */
+int ufs_wake_lun(void)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+
+	for (int lun = 0; lun < 6; lun++) {
+		(void)ufs_ssu((uint8_t)lun);
+		ufs_spin(400000);
+		for (int i = 0; i < 15; i++) {
+			int rc = (int)scsi((uint8_t)lun, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+			if (rc == 0 && st == 0)
+				return lun;
+			ufs_spin(400000);
+		}
+	}
+	return -1;
+}
+
+/* ---------------------------------------------------------------------
+ * UIC DME access. The K60 lets us do the link start-up but the link then
+ * stays in the slow PWM gear, which is why every SCSI command comes back
+ * NOT READY / ABORTED. Linux negotiates gears right after DME_LINKSTARTUP.
+ * UIC opcodes: DME_GET = 0x01, DME_SET = 0x02, LINKSTARTUP = 0x16.
+ * Attribute selector = (PA_attr << 16) | gen_selector.
+ * --------------------------------------------------------------------- */
+#define UIC_OP_DME_GET	0x01
+#define UIC_OP_DME_SET	0x02
+
+#define PA_MAXRXHSGEAR	0x1587	/* values from include/ufs/unipro.h */
+#define PA_RXGEAR	0x1583
+#define PA_TXGEAR	0x1568
+#define PA_TXTERMINATION 0x1569
+#define PA_RXTERMINATION 0x1584
+#define PA_HSSERIES	0x156a
+#define PA_PWRMODE	0x1571
+
+static int ufs_uic_cmd(uint32_t op, uint32_t a1, uint32_t a2, uint32_t *a3)
+{
+	ufs_wr(REG_IS, IS_UCCS);
+	ufs_wr(REG_UICCMDARG1, a1);
+	ufs_wr(REG_UICCMDARG2, a2);
+	ufs_wr(REG_UICCMDARG3, a3 ? *a3 : 0);
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UICCMD, op);
+	if (!wait_set(REG_IS, IS_UCCS, 2000000))
+		return 1;
+	ufs_wr(REG_IS, IS_UCCS);
+	uint32_t r = ufs_rd(REG_UICCMDARG2);
+	if ((r >> 16) & 0xffu)
+		return 2;
+	if (a3)
+		*a3 = ufs_rd(REG_UICCMDARG3);
+	return 0;
+}
+
+int ufs_dme_get(uint32_t attr, uint32_t *val)
+{
+	return ufs_uic_cmd(UIC_OP_DME_GET, (attr << 16) | 0u, 0, val);
+}
+
+int ufs_dme_set(uint32_t attr, uint32_t val)
+{
+	return ufs_uic_cmd(UIC_OP_DME_SET, (attr << 16) | 0u, val, 0);
+}
+
+/* Bring the UniPro link from PWM up to the fastest HS gear the peer offers,
+ * the same order Linux ufshcd uses after DME_LINKSTARTUP. */
+int ufs_negotiate(uint32_t *gear_out)
+{
+	uint32_t gear = 0;
+	int rc = ufs_dme_get(PA_MAXRXHSGEAR, &gear);
+
+	if (rc)
+		return 1;
+	if (gear > 4)
+		gear = 4;
+	if (ufs_dme_set(PA_TXTERMINATION, 1) ||
+	    ufs_dme_set(PA_RXTERMINATION, 1) ||
+	    ufs_dme_set(PA_HSSERIES, 1) ||		/* series A */
+	    ufs_dme_set(PA_TXGEAR, gear) ||
+	    ufs_dme_set(PA_RXGEAR, gear) ||
+	    ufs_dme_set(PA_PWRMODE, 1))			/* FAST_MODE */
+		return 2;
+	uint32_t back = 0xff;
+	if (ufs_dme_get(PA_RXGEAR, &back))
+		return 3;
+	if (gear_out)
+		*gear_out = back;
+	return 0;
+}
+
+/* One TEST UNIT READY on a LUN, reporting the two failure classes apart. */
+int ufs_tur_once(uint8_t lun, uint32_t *status)
+{
+	static const uint8_t tur[6] = { 0x00 };
+	uint32_t ocs = 0, st = 0;
+	int rc = (int)scsi(lun, tur, sizeof(tur), 0, 0, &ocs, &st, 0);
+	if (status)
+		*status = st;
+	ufs_scsi_rc = rc;
+	return rc;
+}
+
+/* ---------------------------------------------------------------------
+ * UTP Query Request UPIU (transaction type 0x07) to READ a descriptor.
+ * This is read-only: it never changes the device configuration.
+ *   idn: 0x00 device, 0x01 configuration, 0x02 unit, 0x04 interconnect
+ * --------------------------------------------------------------------- */
+#define UPIU_TRANSACTION_QUERY	0x07
+#define QUERY_OP_READ_DESC	0x01
+#define DESC_IDN_DEVICE		0x00
+#define DESC_IDN_CONFIG		0x01
+#define DESC_IDN_UNIT		0x02
+
+static uint32_t query_desc(uint8_t lun, uint8_t idn, uint8_t index, uint8_t sel,
+    uint16_t len, void *buf)
+{
+	static uint8_t tag;
+	zero(&utrl[0], sizeof(utrl[0]));
+	zero(&ucd, sizeof(ucd));
+
+	/* UPIU header: transaction, flags=R, LUN, task tag */
+	ucd.cmd[0] = UPIU_TRANSACTION_QUERY;
+	ucd.cmd[1] = 0x00;			/* Linux passes 0 for QUERY UPIUs */
+	ucd.cmd[2] = lun;
+	ucd.cmd[3] = ++tag;
+	/* dword_1: query opcode, descriptor idn, index, selector */
+	ucd.cmd[4] = QUERY_OP_READ_DESC;
+	ucd.cmd[5] = idn;
+	ucd.cmd[6] = index;
+	ucd.cmd[7] = sel;
+	/* dword_2: [0,0, length>>8, length] */
+	ucd.cmd[10] = (uint8_t)(len >> 8);
+	ucd.cmd[11] = (uint8_t)len;
+	/* dword_3 = EDTL */
+	ucd.cmd[12] = (uint8_t)(len >> 24);
+	ucd.cmd[13] = (uint8_t)(len >> 16);
+	ucd.cmd[14] = (uint8_t)(len >> 8);
+	ucd.cmd[15] = (uint8_t)len;
+
+	uintptr_t ucd_pa = (uintptr_t)&ucd;
+	utrl[0].dw0 = (1u << 28) | (2u << 25) | (1u << 24);
+	utrl[0].dw2 = 0x0f;
+	utrl[0].ucdba = (uint32_t)ucd_pa;
+	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
+	utrl[0].resp = (512u / 4) << 16 | (512u / 4);
+	{
+		uintptr_t buf_pa = (uintptr_t)buf;
+		ucd.prdt[0].addr_lo = (uint32_t)buf_pa;
+		ucd.prdt[0].addr_hi = (uint32_t)(buf_pa >> 32);
+		ucd.prdt[0].dbc = len - 1;
+		utrl[0].prdt = (1024u / 4) << 16 | 1;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	ufs_wr(REG_UTRLDBR, 1);
+	uint64_t t0 = 0;
+	for (int i = 0; i < 2000000; i++) {
+		if (!(ufs_rd(REG_UTRLDBR) & 1u))
+			break;
+		t0++;
+	}
+	if (ufs_rd(REG_UTRLDBR) & 1u) {
+		ufs_wr(REG_UTRLCLR, ~1u);
+		return 1;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	if (utrl[0].dw2 & 0xffu)
+		return 2;
+	if (ucd.resp[0] != 0x37)		/* QUERY RESPONSE UPIU */
+		return 3;
+	return 0;
+}
+
+int ufs_read_unit_desc(uint8_t lun, uint8_t *buf, uint16_t len)
+{
+	return (int)query_desc(lun, DESC_IDN_UNIT, lun, 0, len, buf);
+}
+
+int ufs_read_device_desc(uint8_t *buf, uint16_t len)
+{
+	return (int)query_desc(0, DESC_IDN_DEVICE, 0, 0, len, buf);
+}
+
+/* =====================================================================
+ * cmd_db: the RPMh resource table the bootloader leaves at 0x80860000
+ * (DT: aop_cmd_db_region, no-map, 128 KiB). Not readable from Android
+ * userspace, but our shim runs with the MMU off and can read it directly.
+ * Layout from drivers/soc/qcom/cmd-db.c:
+ *   struct cmd_db_header { u32 version; u8 magic[4]; u32 checksum;
+ *                          struct rsc_hdr rsc_hdr[2]; };        (44 bytes)
+ *   struct rsc_hdr { u16 slv_id, header_offset, data_offset, cnt,
+ *                    version, reserved[3]; };                  (16 bytes)
+ *   struct entry_header { u8 id[8]; u32 priority[3]; u32 addr;
+ *                         u16 len; u16 offset; };               (28 bytes)
+ * magic = db 30 03 0c
+ * ===================================================================== */
+#define CMD_DB_BASE	0x80860000UL
+#define CMD_DB_HDR_SIZE	44u	/* version+magic+checksum+2*rsc_hdr(16) */
+#define CMD_DB_ENT_STRIDE 28u
+
+int cmd_db_entry(const char *name, uint32_t *addr_out, uint16_t *slv_out)
+{
+	const uint8_t *base = (const uint8_t *)CMD_DB_BASE;
+
+	if (!(base[4] == 0xdb && base[5] == 0x30 && base[6] == 0x03 && base[7] == 0x0c))
+		return 1;	/* no cmd_db here */
+
+	for (int rsc = 0; rsc < 2; rsc++) {
+		const uint8_t *rh = base + 12 + rsc * 16;
+		uint16_t slv = (uint16_t)(rh[0] | (rh[1] << 8));
+		uint16_t hoff = (uint16_t)(rh[2] | (rh[3] << 8));
+		uint16_t cnt = (uint16_t)(rh[6] | (rh[7] << 8));
+		const uint8_t *e = base + CMD_DB_HDR_SIZE + hoff;
+
+		for (uint16_t i = 0; i < cnt && i < 512; i++, e += CMD_DB_ENT_STRIDE) {
+			int same = 1;
+			for (int c = 0; c < 8; c++) {
+				char ec = (char)e[c];
+				if (ec != name[c]) {
+					same = 0;
+					break;
+				}
+				if (!ec)
+					break;
+			}
+			if (!same)
+				continue;
+			uint32_t a = (uint32_t)e[20] | ((uint32_t)e[21] << 8) |
+				     ((uint32_t)e[22] << 16) | ((uint32_t)e[23] << 24);
+			if (addr_out)
+				*addr_out = a;
+			if (slv_out)
+				*slv_out = slv;
+			return 0;
+		}
+	}
+	return 2;
+}
+
+/* Enable the display clocks the Android clock tree shows as on, then let the
+ * caller probe disp_cc. Registers are snapshotted so gcc_restore() puts them
+ * back before the reset. */
+int gcc_disp_bring_up(void)
+{
+	if (gcc_clk_on(0x3700c))	/* gcc_disp_hf_axi_clk */
+		return 1;
+	if (gcc_clk_on(0x37014))	/* gcc_disp_sf_axi_clk */
+		return 2;
+	return 0;
+}
+
+/* Generic snapshot/restore for any MMIO register we touch, so probes leave no
+ * trace behind for the next Android boot. */
+struct saved_reg { uintptr_t addr; uint32_t val; };
+static struct saved_reg g_regs[24];
+static int g_nregs;
+
+void reg_note(uintptr_t addr)
+{
+	for (int i = 0; i < g_nregs; i++)
+		if (g_regs[i].addr == addr)
+			return;
+	if (g_nregs < 24) {
+		g_regs[g_nregs].addr = addr;
+		g_regs[g_nregs].val = *(volatile uint32_t *)addr;
+		g_nregs++;
+	}
+}
+
+void reg_restore_all(void)
+{
+	for (int i = 0; i < g_nregs; i++)
+		*(volatile uint32_t *)g_regs[i].addr = g_regs[i].val;
+	__asm__ volatile("dsb sy" ::: "memory");
+	g_nregs = 0;
+}
+
+/* Power the display clock controller and its internal clock branches. */
+int disp_bring_up(uint32_t *hw_version)
+{
+	if (gcc_disp_bring_up())
+		return 1;
+
+	uintptr_t gdscr = 0x0af00000UL + 0x9000UL;
+	reg_note(gdscr);
+	{
+		volatile uint32_t *g = (volatile uint32_t *)gdscr;
+		uint32_t v = *g & ~1u;
+		v |= 0xfu << 20; v |= 0xfu << 16; v |= 0xfu << 12;
+		v &= ~(1u << 4);
+		*g = v;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	static const uint32_t branches[] = {
+		0x80a4,	/* disp_cc_mdss_ahb_clk    */
+		0x800c,	/* disp_cc_mdss_mdp_clk    */
+		0x8028,	/* disp_cc_mdss_byte0_clk  */
+		0x802c,	/* disp_cc_mdss_byte0_intf */
+	};
+	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
+		uintptr_t a = 0x0af00000UL + branches[i];
+		reg_note(a);
+		*(volatile uint32_t *)a = *(volatile uint32_t *)a | 1u;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	if (hw_version)
+		*hw_version = *(volatile uint32_t *)0x0ae00000UL;
+	return 0;
+}
+
+/* ---- minimal DSI command-mode transmit ------------------------------- */
+#define DSI0_BASE	0x0ae94000UL
+#define DSI_DMA_BUF	0xb8003000UL
+#define DSI_CMD_DMA_CTRL	0x038UL
+#define DSI_DMA_BASE	0x044UL
+#define DSI_DMA_LEN	0x048UL
+#define DSI_TRIG_CTRL	0x080UL
+#define DSI_ACK_ERR	0x064UL
+
+static void dsi_pause_ms(unsigned ms)
+{
+	uint64_t f = *(volatile uint64_t *)0;	/* placeholder, replaced below */
+	(void)f;
 }

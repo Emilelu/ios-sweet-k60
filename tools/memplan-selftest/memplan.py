@@ -34,13 +34,30 @@ PAGE = 0x4000                 # arm64 16 KiB granule
 SIZEOF_VM_PAGE = 80           # see the note in sim.c
 PHYS_TOP_4G = 0x100000000
 
-# topOfKernelData - dram-base = kernel_end + ADT + boot_args. It moves with the
-# kernel image: the payload mkpayload.py builds today puts kernel_end at
-# +0x24d8000, so 0x24e0000. The 2026-10-25 bad-ADT boot (dram 0x80000000 +
-# 0x39200000, "vm_page_bootstrap: 55885 free pages") pins its own value to
-# 0x2488000 -- check.py uses that to prove this page model reproduces real
-# device output to the page.
-KERNEL_FOOT = 0x24e0000
+# topOfKernelData - dram-base: the first byte of the window the VM may use.
+# Everything below it is ours (payload segments, ADT, boot_args). The shim
+# places it (ios-sweet/shim/loader.c:180-205):
+#
+#   adt_pa = phys_base + (kernel_end - virt_base)   # segments, then the ADT
+#   ba_pa  = align16k(adt_pa + adt_size)            # pad, then boot_args
+#   top    = ba_pa + 0x4000                         # one 16 KiB boot_args page
+#   foot   = top - phys_base
+#
+# So it is a property of the kernel image, not of the machine: every rebuild
+# that changes the payload's text/data size moves it, and the free-page count
+# moves with it 1:1 at 16 KiB granularity / 1 MiB per 64 pages.
+#
+# For artifacts/xnu-adreno-m1m3-verify.img (payload header, file offset 0x30000)
+# the fields are virt_base 0xfffffe0006000000, kernel_end 0xfffffe00084dc000,
+# adt_size 0x2774, phys_base 0xb4000000, which gives adt_pa 0xb64dc000,
+# ba_pa 0xb64e0000, top 0xb64e4000 and therefore foot 0x24e4000. The previous
+# 0x24e0000 stopped one 16 KiB page lower, at ba_pa, and so freed one page too
+# many: 41272 instead of 41271, and likewise P1/P2 (46042/62869 -> 46041/62868).
+#
+# The 2026-10-25 bad-ADT boot (dram 0x80000000 + 0x39200000, "vm_page_bootstrap:
+# 55885 free pages") pins its own value to 0x2488000 -- check.py uses that to
+# prove this page model reproduces real device output to the page.
+KERNEL_FOOT = 0x24e4000
 OLD_ADT_FOOT = 0x2488000      # kernel.development.sweet, 2026-10-25 boot
 OLD_ADT_FREE_PAGES = 55885   # what that boot printed
 

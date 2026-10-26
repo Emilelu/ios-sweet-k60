@@ -20,9 +20,9 @@ gunyah、qtee、无 DRAM 的洞）用"页面照建、永不入空闲队列"的 n
 
 | 方案 | 改什么 | ADT dram-size | 空闲页 | 相比今天 |
 |---|---|---|---|---|
-| **P0** 现状 | — | 703.0 MiB | 41272 页 / **644.9 MiB** | — |
-| **P1** 抬高上界 | ADT 窗口 + notch | 788.9 MiB | 46042 页 / **719.4 MiB** | **+74.5 MiB** |
-| **P2** 下移 payload | ADT 窗口（同上补丁） | 1060.9 MiB | 62869 页 / **982.3 MiB** | **+337.5 MiB** |
+| **P0** 现状 | — | 703.0 MiB | 41271 页 / **644.9 MiB** | — |
+| **P1** 抬高上界 | ADT 窗口 + notch | 788.9 MiB | 46041 页 / **719.4 MiB** | **+74.5 MiB** |
+| **P2** 下移 payload | ADT 窗口（同上补丁） | 1060.9 MiB | 62868 页 / **982.3 MiB** | **+337.5 MiB** |
 
 P1/P2 都只需要**同一个补丁**（`0184-k60-ram-notches.patch`）。P2 额外要一台上机确认
 "`0xa3000000` 这一段现在没人用"（§7 第 2 条）。再往上（把窗口拉到 4 GiB）净收益只有
@@ -31,7 +31,7 @@ P1/P2 都只需要**同一个补丁**（`0184-k60-ram-notches.patch`）。P2 额
 
 顺带修正一个一直在用的数字：**703 MB 是 ADT 告诉 XNU 的 dram-size，不是可用内存**。
 内核自己 + ADT + boot_args 占掉约 37 MiB，面板帧缓冲 18 MiB 不能进空闲队列，
-vm_page 数组再吃掉约 3.7 MiB，所以今天真正能分配的只有 **41272 页 = 644.9 MiB**。
+vm_page 数组再吃掉约 3.7 MiB，所以今天真正能分配的只有 **41271 页 = 644.9 MiB**。
 
 ---
 
@@ -128,7 +128,7 @@ vm_page 数组再吃掉约 3.7 MiB，所以今天真正能分配的只有 **4127
 1. `osfmk/arm64/arm_vm_init.c:2000`：`avail_start = args->topOfKernelData;`
    —— **下界不是 dram-base，是 payload 的结尾**。把 dram-base 调低而 payload 不动，
    一点内存都多不出来。反过来，payload 落在 `0xa3000000`，下界就变成
-   `0xa54e0000`（`kernel_end + ADT + boot_args`）。
+   `0xa54e4000`（`kernel_end + ADT + boot_args`）。
 2. `arm_vm_init.c:2017`：`avail_end = gPhysBase + mem_size;`
    —— 上界就是一个数。arm64 没有 x86 那种 memory map，`pmap_startup()` 用
    `pmap_free_pages_span()` 一次性线性枚举 `[first_avail, avail_end)`。
@@ -155,10 +155,10 @@ vm_page 数组再吃掉约 3.7 MiB，所以今天真正能分配的只有 **4127
 | ADT dram-base | `0xb4000000` | `0xb4000000` | **`0xa3000000`** | `0xa3000000` |
 | ADT `ADT_MEM_SIZE` | `0x2c000000` | **`0x315f0000`** | **`0x425f0000`** | `0x5d000000` |
 | dram-size（= 报给 XNU） | `0x2bf00000` | `0x314f0000` | `0x424f0000` | `0x5cf00000` |
-| 管理窗口 | `0xb64e0000-0xdff00000` | `0xb64e0000-0xe54f0000` | `0xa54e0000-0xe54f0000` | `0xa54e0000-0xfff00000` |
+| 管理窗口 | `0xb64e0000-0xdff00000` | `0xb64e0000-0xe54f0000` | `0xa54e4000-0xe54f0000` | `0xa54e4000-0xfff00000` |
 | panic log | `0xdff00000` | `0xe54f0000` | `0xe54f0000` | `0xffe00000`（危险） |
 | notch 页数 | 1152（面板） | 1856 | 2352 | 还要 +6 段 |
-| 空闲页 / MiB | 41272 / 644.9 | 46042 / **719.4** | 62869 / **982.3** | ~1040（乐观 1406） |
+| 空闲页 / MiB | 41271 / 644.9 | 46041 / **719.4** | 62868 / **982.3** | ~1040（乐观 1406） |
 | 可行性 | 已在跑 | 高 | 中（要确认 payload 落点） | 低 |
 | 风险 | — | 只多 11 MiB 固件区在图里，已有 `ESR` 先例说明必须 notch | ABL 可能在自己的 kernel 载入地址上压到新窗口；61.5 MiB 洞里还有没有别的东西没人看过 | 跨 171.5 MiB 无 DRAM 洞 + 172 MiB Linux 保留区，panic log 落在"≥`0xe9f00000` 会中止"的规则里 |
 | 需要补丁 | `0172`（已有） | **1 个**（`0184`） | **1 个**（同一个 `0184`） | `0184` + panic-base 覆盖 + 探针，共 3 个 |
@@ -191,7 +191,7 @@ panic log       0xe54f0000 - 0xe55f0000   （窗口上方 1 MiB，DRAM 内，避
 空闲队列        0xb6888000-0xb8000000   ( 23.5 MiB)
                 0xb9200000-0xe0000000   (622.0 MiB)
                 0xe0b00000-0xe54f0000   ( 73.9 MiB)
-                = 46042 页 / 719.4 MiB
+                = 46041 页 / 719.4 MiB
 ```
 
 命令行：`MEMPLAN=p1 ./tools/k60-build-boot.sh <kernel> out.img`
@@ -202,7 +202,7 @@ panic log       0xe54f0000 - 0xe55f0000   （窗口上方 1 MiB，DRAM 内，避
 ```
 ADT dram-base   0xa3000000      (在 61.5 MiB 空闲洞的起点，37 MiB 内核放得下)
 ADT dram-size   0x424f0000      (1060.9 MiB)
-avail_start     0xa54e0000      = dram-base + 0x24e0000
+avail_start     0xa54e4000      = dram-base + 0x24e4000
 avail_end       0xe54f0000
 panic log       0xe54f0000 - 0xe55f0000
 空闲队列        0xa59dc000-0xa6b80000   ( 17.6 MiB)
@@ -210,7 +210,7 @@ panic log       0xe54f0000 - 0xe55f0000
                 0xa7400000-0xb8000000   (268.0 MiB)
                 0xb9200000-0xe0000000   (622.0 MiB)
                 0xe0b00000-0xe54f0000   ( 73.9 MiB)
-                = 62869 页 / 982.3 MiB
+                = 62868 页 / 982.3 MiB
 ```
 
 命令行：`MEMPLAN=p2 ./tools/k60-build-boot.sh <kernel> out.img`
@@ -255,10 +255,10 @@ qtee 里。所以"`0xe9f00000` 以上都被 XPU 拦"这句话很可能是把
 
 **1. 确认 notch 生效（最关键的判据）**
 - 看 `vm_page_bootstrap: N free pages`：
-  - P1 应看到 **46042 页**（±10 页，差在 `sizeof(vm_page)` 和 ADT 长度；
+  - P1 应看到 **46041 页**（±10 页，差在 `sizeof(vm_page)` 和 ADT 长度；
     换内核后 `kernel_end` 每变 1 MiB 这个数就少 64 页，先看 `PHYS`/`SEGS` 那两行）；
-  - P2 应看到 **62869 页**；
-  - 如果仍是 **41272 左右**：`0184` 没进内核（或 `MEMPLAN` 没生效）；
+  - P2 应看到 **62868 页**；
+  - 如果仍是 **41271 左右**：`0184` 没进内核（或 `MEMPLAN` 没生效）；
   - 如果看到 **大于 47000（P1）/ 64000（P2）**：dram-size 或 notch 有一个错了，
     **立刻停机**，这就是 2026-10-25 那次无声猝死的形状。
 - 再看 `SWEET MEM: physmap ... MiB, VM manages ... MiB (dram-size)`：P1 应是
@@ -269,7 +269,7 @@ qtee 里。所以"`0xe9f00000` 以上都被 XPU 拦"这句话很可能是把
 - 目的：确认 ABL 把我们的 boot.img kernel blob 放在哪，别让 shim 在拷贝时把自己盖掉。
 - 做法：开机看 shim 控制台第一屏的 `PAYLOAD self-image at +N lo <addr>`（`loader.c`
   无条件打印），拍照记下 `lo`。
-- 判据：`lo + 0x40000`（shim 镜像大小 + 余量）**不在** `0xa3000000-0xa54e0000` 内 → 安全。
+- 判据：`lo + 0x40000`（shim 镜像大小 + 余量）**不在** `0xa3000000-0xa54e4000` 内 → 安全。
   典型值是 `0x80008000` 一带（ABL 的 kernel 载入地址），那就在安全区。
   如果恰好落在里面，换 `ADT_PHYS_BASE=0xa2800000`（整段下移 8 MiB）或退回 P1。
 
@@ -284,7 +284,7 @@ qtee 里。所以"`0xe9f00000` 以上都被 XPU 拦"这句话很可能是把
 **4. `0xf4600000` bank 探针（只影响 P3，可选）**
 - 现成工具：`ios-sweet/shim/shim.c` 里的 `K60_RDCHECK` 块（编译时 `-DK60_RDCHECK`），
   把 `addrs[]` 换成下面这组，屏上逐行打印读到的值：
-  `0xa2e00000, 0xa3000000, 0xa54e0000, 0xa6b7f000, 0xa6e40000, 0xa7400000,
+  `0xa2e00000, 0xa3000000, 0xa54e4000, 0xa6b7f000, 0xa6e40000, 0xa7400000,
    0xb6810000, 0xb8000000, 0xd5c00000, 0xe0000000, 0xe0b00000, 0xe54f0000,
    0xe55f2ff0, 0xe5700000, 0xe87ffff0, 0xe8800000, 0xe9f00000, 0xea000000,
    0xf45ffff0, 0xf4600000, 0xf8000000, 0xfffff000`
@@ -431,11 +431,11 @@ VM_PAGE_GET_PHYS_PAGE(vm_page_t m)
 P4 的数字是模型算的（`memplan.py --plans`），但**模型当场就把 P4 挡住了**：
 
 ```
-sim: vm_page array [0xa54e0000,0xb1900000) runs into a notch at 0xa6b80000
+sim: vm_page array [0xa54e4000,0xb1900000) runs into a notch at 0xa6b80000
 ```
 
 原因很实在：`pmap_steal_freeable_memory()` 是**从窗口底部连续**抠页的，P4 要 196 MB，
-而 `0xa54e0000` 往上只有 22.6 MiB 就撞上 xbl_ramdump 的 carve-out。也就是说 B 路线
+而 `0xa54e4000` 往上只有 22.6 MiB 就撞上 xbl_ramdump 的 carve-out。也就是说 B 路线
 不能只改 ADT —— 还得让数组能落到窗口里别处的干净连续区（改
 `pmap_steal_freeable_memory()`/`pmap_next_page()`，1 个补丁），这就是"2 个补丁"的由来。
 只压到 P2 是 5.2 MB，那段 17.6 MiB 的空闲区刚好装得下，所以 P2 不受影响。

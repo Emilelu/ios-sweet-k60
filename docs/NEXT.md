@@ -11,20 +11,20 @@
 > 规划见 `PLAN-BOOTARGS-CHAIN.md`。
 
 > **2026-10-26 16:50 上机轮结果（先读这段）**：内存门禁 **失败**（`vm_page_bootstrap`
-> 55885 页，不是 41272），Adreno **一行输出都没有**，启动仍在 45 s 后被
+> 55885 页，不是 41271），Adreno **一行输出都没有**，启动仍在 45 s 后被
 > `SWEET TOUCH: gcc probe vote read` 打断。**这一轮对 GPU 无结论，p1/p2 继续禁刷。**
 > 完整证据与下一步见 `GPU-PORT-NOTES.md` §17。
 
 ## 2026-10-26 内存轮（离线，别和 GPU 那轮混）
 
 - **703 MB 不是天花板**，它只是"payload 在 `0xb4000000`、上界卡在 gunyah 前"这个摆法的
-  `dram-size`。真正的可用内存是 **41272 页 = 644.9 MiB**（内核 + 面板 + vm_page 数组都在这 703 里）。
+  `dram-size`。真正的可用内存是 **41271 页 = 644.9 MiB**（内核 + 面板 + vm_page 数组都在这 703 里）。
 - 两个方案已算清，本地校验台全绿：`cd k60-repo-full/tools/memplan-selftest && ./run.sh`
   - P1（只抬上界，**+74.5 MiB** → 719.4 MiB）：`MEMPLAN=p1 ./tools/k60-build-boot.sh ...`
   - P2（payload 下移到 `0xa3000000`，**+337.5 MiB** → 982.3 MiB）：`MEMPLAN=p2 ...`
 - 两个方案共用**一个**新补丁 `0184-k60-ram-notches.patch`（把 0170 的单一面板判断换成
   5 段 notch 表）。**0184 必须先进内核**，否则抬窗口就会踩 gunyah → 无声挂死。
-- 上机判据：`vm_page_bootstrap` 页数应为 **46042（P1）/ 62869（P2）**，不是 41272。
+- 上机判据：`vm_page_bootstrap` 页数应为 **46041（P1）/ 62868（P2）**，不是 41271。
 - 细节、地址表、needs-device 清单全在 `MEMORY-PLAN.md`。
 - **§10 新增「Android 多段内存对照」**：Android 在同一台机器上用到 8.2 GiB（6.9 GiB 在
   4 GiB 以上），Linux 靠 memblock 多段 + reserved/nomap + 稀疏 section 做到；XNU 缺的只是

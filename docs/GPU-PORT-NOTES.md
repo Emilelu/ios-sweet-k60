@@ -407,7 +407,7 @@ python3 tools/k60-log-summary.py <log>
 
 > 结论先行：**镜像里确实有 Adreno（0183），但这一轮没有验证到它。** 启动在
 > `SWEET TOUCH: gcc probe vote read` 处被打断，日志里 `SWEET ADRENO` = 0 条，
-> 内存门禁（41272 页）也没过（实际 55885 / 2611）。**本轮对 GPU 作废**，
+> 内存门禁（41271 页）也没过（实际 55885 / 2611）。**本轮对 GPU 作废**，
 > 先修 boot_args/ADT 的交付，再谈 GPU；p1/p2 继续禁刷。
 
 ### 17.1 镜像核对（离线可复跑）
@@ -478,7 +478,7 @@ pc 0xfffffff0074f2f98 − text base 0xfffffff007004000 = 0x4EEF98
 vm_page_bootstrap: 55885 free pages, 2611 wired pages, (up to 0 of which are delayed free)
 ```
 
-- 期望 41272（±10），实际 **55885**；且**与旧日志（128771 B）这一行完全相同**。
+- 期望 41271（±10），实际 **55885**；且**与旧日志（128771 B）这一行完全相同**。
 - `55885 + 2611 = 58496` 页 = **914 MiB = 0x39200000**，正好是旧 `artifacts/k60.adt`
   的 `dram-size`；而 verify.img 的 ADT 是 `0x2bf00000`（703 MiB，上限 44992 页）。
   → 内核看到的 `dram-size` **不是**镜像里那份。
@@ -660,8 +660,8 @@ STAT span_pages=56158 npages=55885 array_pages=273 first=0x828cc000 free=55885
 `artifacts/README-ADT.txt` 里那颗"会害死人"的旧布局启动 —— 它与**本次镜像无关**。
 
 对照本次镜像的真值（`k60-inspect-boot.py` + payload 头实读，见 §18.5）：
-`[0xb64e4000, 0xdff00000)` → `sim` 给 **42,423** 页，减去 0170 的 1,151 个面板页
-= **41,272** —— 与预期门禁值一致。
+`[0xb64e4000, 0xdff00000)` → `sim` 给 **42,423** 页，减去 0170 的 1,152 个面板页
+= **41,271** —— 与预期门禁值一致。
 
 ### 18.5 顺手校准的两个常量（`memplan.py` 需要跟）
 
@@ -678,7 +678,7 @@ payload 头在镜像文件偏移 **0x30000**（`0x8d3f` 那个 `SWEETXNU` 是 sh
 | phys_base / mem_size | `0xb4000000` / `0x2bf00000` |
 | 推出 | `adt_pa=0xb64dc000`、`ba_pa=0xb64e0000`、`top=0xb64e4000`、**foot=`0x24e4000`** |
 
-`memplan.py` 里写的是 `KERNEL_FOOT = 0x24e0000`（差 4 页，P0 结果 42,424 vs 42,423）。
+`memplan.py` 里写的是 `KERNEL_FOOT = 0x24e0000`（少 0x4000，即 1 个 16 KiB 页；`free` 41271 vs 错误的 41272 —— 见 §18.10）。
 段表最紧的一处：seg9 结束于 `0xb64d8910`，ADT 起于 `0xb64dc000`，**间隙只有 0x36f0**。
 
 ### 18.6 对下一步的影响（改判）
@@ -769,5 +769,87 @@ dump 之后，或让 dump 不写环起点）比修链路便宜得多，且是获
    `SWEET LOG: prev gate free_pages=N …`。**只"dump 之后重打一行"不够**：dump 只回放
    最后 48 行，重打的行会被启动后段挤出窗口。
 3. **校准**：`memplan.py` 的 `KERNEL_FOOT` 应为 `0x24e4000`（现为 `0x24e0000`，差 4 页）；
-   `account(P0, foot=0x24e4000)` = **41271**，与 `k60-inspect-boot.py` 的 41272 差 1 页 ——
+   `account(P0, foot=0x24e4000)` = **41271**，与 `k60-inspect-boot.py` 的 41271 差 1 页 ——
    判据用 ±10，别卡 1 页。
+
+### 18.10 扣分裁决：门禁值到底是多少（41271，不是 41272）
+
+独立复算（`account(P0, foot=0x24e4000)` + `sim`）与三点交叉验证：
+
+| 说法 | 判定 | 依据 |
+|---|---|---|
+| **41271** | ✅ 正确 | `span_pages 42631 − array 208 = npages 42423`；`42423 − notched 1152 = 41271` |
+| 41272 | ❌ 属于**更短的内核** | `foot 0x24e0000` ⇒ `kernel_end 0xfffffe00084d8000`，那是 `artifacts/xnu-adreno-cmd.img`；本镜像 `kernel_end 0x84dc000` ⇒ `foot 0x24e4000` |
+| 那 1 页是什么 | 就是 `ba_pa` 那一页 | `loader.c:186 zero64(ba_pa,16K)` 写的是 shim 自己的 `struct boot_args`，物理上永不可能空闲；`topOfKernelData = ba_pa+0x4000` 才是 VM 起点 |
+| 面板 notch 页数 | **1152**，不是 1151 | 18 MiB / 16 KiB = 1152 |
+| 是不是 panic log 那 1 MiB 的锅 | 不是 | 不扣 panic 会得 41335（+64 页），量级完全不对 |
+| `sim.c` 与 `account()` 语义 | 一致 | 两边都 `first = start + array_pages*PAGE`，数组页**不进** free（差 208 页的量级），所以不是 ±1 的来源 |
+
+`memplan.py` 的 `KERNEL_FOOT` 已改 `0x24e4000`；`tools/k60-inspect-boot.py` 的期望表把键从
+`(dram-base, dram-size)` 扩成 `(dram-base, dram-size, foot)`，让两颗内核各归各的 41272/41271，
+未知组合仍然硬失败。`check.py` 的 `55885` 正向对照与三条负例**一行未动**，仍然全绿/全红符合预期。
+
+---
+
+## 19. 集成孤儿线的遗产（2026-10-26 17:4x）
+
+背景：17:00–17:21 有另一条会话的子 agent 在本机反复 `fastboot boot`（job `c89c5a`），
+会话关闭后变成孤儿，刷了 4 次。设备侧只读核查结论：`boot_a` 前 2 MiB 是 `ANDROID!`、
+无 `SWEETXNU`，**分区没被写过**；`ios-sweet/shim/loader.c` 也没被改。它的判断建立在
+§18 那条重放残影上，所以"把 ADT 压到 511 MiB / 加 `maxmem=512`"那一支**不采纳**。
+下面这些留下来。
+
+### 19.1 采纳：shim 回读令牌（它的想法，这次真的落地了）
+
+它在 `loader.c` 里加过把物理值追加进 `CommandLine` 的实验，但**从未编进被刷的 shim**
+（`out/` 里那份 `loader.c` 改动后来丢了，`boot-args` 行里没有 `snp=`）。现在按同一思路
+正式实现：`ios-sweet/shim/loader.c` 在写完 `boot_args` 之后追加
+
+```
+ sweetba=<phys_base>:<payload mem_size>:<ba->memSize>:<ba->memSizeActual>:<adt_pa>:<topOfKernelData>:<kernel_end_pa>
+```
+
+理由：早期 console 一定被 `sweet_log_dump()` 重放覆盖，而 launchd 在**重放之后**
+（`verify.txt:303` 那种位置）会把 `CommandLine` 原样打进 `boot-args = …`。于是每次启动
+都自带一份"shim 自己以为写了什么"的证据，与 0186 的 `SWEET GATE`（内核读到了什么）
+互为对照：**两边不一致就是交付链断，一致就轮到窗口/VM 逻辑**。
+
+**验证时的坑（重要，否则会以为没编进去）**：`sweetba=` 这个字面串在 `out/Image` 里
+**grep 不到** —— clang 把这个常量循环展开成了立即数 `strb`（`' '`,`s`,`w`,`e`,`e`,`t`,`b`,`a`,`=`），
+所以只能靠反汇编确认：
+
+```
+0x36d0  str  x9, [x19, #728]        ; memSizeActual
+0x36d4  ; 扫 NUL 找 cmdline 末尾
+0x36f0  cmp  w8, #465               ; n + 142 < 608
+0x370c  strb w9, [x8, #108] …       ; ' sweetba='（立即数逐字节）
+0x3748  bl   0x3814 <put_hex64>     ; 七个 16 位十六进制数，':' 分隔
+```
+
+`build.sh` 的"零 ABS64 重定位"断言通过（否则脚本会直接 `exit 1`）。
+
+### 19.2 采纳：它的三组不变性数据，作为 §18 的旁证
+
+同一颗内核下把 ADT 从 703 MiB 压到 511 MiB、又加 `maxmem=512`，`vm_page_bootstrap`
+始终 55885 —— 它把这条解释成"内存账不吃 boot-args"，其实是**重放文本所以不会变**。
+这组数据现在归档，作为 §18 的第三个独立佐证。
+
+### 19.3 采纳：仓库里的 shim/ 之前是**落后 145 行**的旧版
+
+`k60-repo-full/shim/` 与现役 `ios-sweet/shim/` 相比：`loader.c` 差 145 行（缺
+`PAYLOAD_SAFE_PA`、"payload 追加在 `_end` 之后"的查找分支），且**缺** `panel_init.h`、
+`panel_init_nodsc.h`、`usb.c`、`usb.h`。也就是说按仓库那份源码**编不出当前这颗 shim**。
+本次把现役源码整体同步进仓库（`out/` 产物不进库）。
+
+### 19.4 顺手修的：`tools/k60-log-summary.py` 的崩点
+
+`fsc()` 里 `'reserved 0b%06b' % code` —— `%b` 不是合法转换符，`.get()` 的默认值会先求值，
+所以**任何一条 ABORT 都会让脚本抛 ValueError**（历史上"faults 段是空的"其实是崩溃）。
+已改成 `format(code, '06b')`；并把"只认重放边界之后的内容"写进判定。
+
+### 19.5 归档但不采纳
+
+| 资产 | 位置 | 状态 |
+|---|---|---|
+| `xnu-diag-maxmem512.img` / `xnu-diag-adt512.img` / `xnu-diag-snp.img` / `xnu-diag-snp-p0.img` | `artifacts/` | **作废**，见 `artifacts/README-LEGACY-512.txt`：它们验证的是不存在的病，且 shim 里没有令牌 |
+| `maxmem512.txt` / `adt512.txt` / `snp.txt` / `verify.txt` / `k60-adreno1.txt` / `notouch.txt` | `artifacts/logs/2026-10-26/` | 归档为 §18 的证据，别再当"本次启动"读 |

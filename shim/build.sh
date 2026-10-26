@@ -20,7 +20,7 @@ HDRVER=${HDRVER:-4}
 # for the panic switch, breaking the "no absolute relocations" invariant below.
 CFLAGS="${CFLAGS_EXTRA:-} -O2 -ffreestanding -nostdlib -fno-pic -fno-jump-tables -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
 mkdir -p out
-OBJS="start.S shim.c console.c mmu.c fdt.c loader.c ufs.c"
+OBJS="start.S shim.c console.c mmu.c fdt.c loader.c ufs.c usb.c"
 for f in $OBJS; do
 	$CC $CFLAGS -c $f -o out/${f%.*}.o
 done
@@ -28,16 +28,23 @@ done
 $CC $CFLAGS -fno-builtin -c klibc.c -o out/klibc.o
 # The image runs wherever ABL puts it with no relocation pass: only the
 # header's image_size (start.o, linked at 0) may be an absolute address.
-abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/klibc.o | grep -c ABS64 || true)
+abs=$($READELF -r out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/usb.o out/klibc.o | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 $CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,-N \
-	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/klibc.o -o out/shim.elf
+	out/start.o out/shim.o out/console.o out/mmu.o out/fdt.o out/loader.o out/ufs.o out/usb.o out/klibc.o -o out/shim.elf
 $OBJCOPY -O binary out/shim.elf out/Image
 # ABL copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
 size=$($NM out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
 truncate -s "$size" out/Image
 # Ramdisk: an xnu payload (tools/mkpayload.py) if given as $1, else an empty
 # newc cpio (ABL dislikes a zero-size ramdisk on some builds) -> diagnostics.
+# ABL on some devices (K60/mondrian) ignores the ramdisk handed to
+# `fastboot boot`, so a payload can also ride *inside* the kernel blob: it is
+# appended right after the shim's _end and the loader finds it by magic.
+if [ -n "${PAYLOAD:-}" ]; then
+	cat "$PAYLOAD" >> out/Image
+	echo "appended payload $(stat -c%s "$PAYLOAD") bytes to out/Image"
+fi
 if [ -n "${1:-}" ]; then
 	cp "$1" out/ramdisk.bin
 else
