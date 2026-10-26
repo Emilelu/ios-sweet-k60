@@ -1,5 +1,38 @@
 # 回来后从这里继续
 
+## 2026-10-26 内存轮（离线，别和 GPU 那轮混）
+
+- **703 MB 不是天花板**，它只是"payload 在 `0xb4000000`、上界卡在 gunyah 前"这个摆法的
+  `dram-size`。真正的可用内存是 **41272 页 = 644.9 MiB**（内核 + 面板 + vm_page 数组都在这 703 里）。
+- 两个方案已算清，本地校验台全绿：`cd k60-repo-full/tools/memplan-selftest && ./run.sh`
+  - P1（只抬上界，**+74.5 MiB** → 719.4 MiB）：`MEMPLAN=p1 ./tools/k60-build-boot.sh ...`
+  - P2（payload 下移到 `0xa3000000`，**+337.5 MiB** → 982.3 MiB）：`MEMPLAN=p2 ...`
+- 两个方案共用**一个**新补丁 `0184-k60-ram-notches.patch`（把 0170 的单一面板判断换成
+  5 段 notch 表）。**0184 必须先进内核**，否则抬窗口就会踩 gunyah → 无声挂死。
+- 上机判据：`vm_page_bootstrap` 页数应为 **46042（P1）/ 62869（P2）**，不是 41272。
+- 细节、地址表、needs-device 清单全在 `MEMORY-PLAN.md`。
+
+## 2026-10-26 收尾：当前状态与设备回来后的顺序
+
+**状态**
+
+| 项 | 值 |
+|---|---|
+| 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0184 GMU 固件入内核（`0168` 已删：上下文被 0064 取代、宽授权有害，见 GPU-PORT-NOTES §14） |
+| 本地自测 | `cd k60-repo-full/tools/adreno-selftest && ./run.sh 0184` → 14 项全过；`gmu-model` 11 项全过 |
+| CI 内核（0179–0183） | `artifacts/kernel-adreno-0183.sweet`，17,303,824 字节，`NOUNDEFS` |
+| 可刷镜像 | `artifacts/xnu-adreno-m1m3.img`（cmdline `sweetadreno=1 sweetadreno_stage=3`）——**不含 0184** |
+| 未推 | 本轮提交（等内存侧修完提交归属） |
+| M3 上传 | 未实现；cache 段要 GPU 可见内存、HFI 要 IOVA，依赖 kgsl SMMU |
+
+**设备回来后的执行顺序**
+
+1. `K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3 sweetadreno_fwinfo=1" ./tools/k60-build-boot.sh <最新内核> artifacts/xnu-adreno.img`
+2. `fastboot boot artifacts/xnu-adreno.img`（M1+M2+M3 只读，一次启动）
+3. `./tools/k60-log-pull.sh` + `python3 tools/k60-log-summary.py`
+4. 判据顺序：`fw vector … plausible` → `probe done` → `snapshot[pre-power]` →
+   `GPUCC verified: n/7` → GMU 三段状态。全绿才谈 M3 上传（先要有 SMMU）。
+
 ## 2026-10-26 离线轮之后（先读这段）
 
 - **GPU**：`0179` 的寄存器表核对无误，但时钟等待有 3 处与 vendor 语义不符，

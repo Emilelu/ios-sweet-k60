@@ -94,14 +94,19 @@ clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I stubs -ffreestanding
 | delayed（0x911c 不清 CLK_OFF） | `branch 0x911c halted (0xa0000000)` | `GPUCC up` |
 | busy（0x9318 update 位残留） | 继续写 mux（静默丢配置） | `root mux 0x9318 update already pending, stopping` |
 
-版本矩阵（`./run.sh <补丁号>` 的通过项数，单调递增即为补丁序列的净效果）：
+版本矩阵（`./run.sh <补丁号>` 的通过项数）：
 
-| 重建到 | 通过项 | 失败项 |
-|---|---|---|
-| 0179 | 3 | 3（hwcg / delayed / busy） |
-| 0180 | 6 | 0 |
-| 0181 | 10 | 0 |
-| 0182 | 12 | 0 |
+| 重建到 | 默认 | `K60_ALLOW_MANGLED=1` | 说明 |
+|---|---|---|---|
+| 0179 | 0（链接守卫拦下） | 3 | 3 项失败：hwcg / delayed / busy |
+| 0180 | 0（同上） | 6 | 时钟语义全修好 |
+| 0181 | 0（同上） | 10 | 加预检与收尾验证 |
+| 0182 | 0（同上） | 12 | 加分阶段与快照 |
+| 0183 | 12 | 12 | 修完 `extern "C"`，守卫放行 |
+| 0184 | 14 | 14 | 加固件自检（0183 之后才有意义） |
+
+0179–0182 是历史版本，本身带着 C++ 修饰符号，链接守卫会直接拦下；回看它们的
+时钟语义时用 `K60_ALLOW_MANGLED=1`。
 
 附带证据：`gpu-fw/gmu_gen70000.bin`（57,272 字节）用上游 `AdrenoFirmwarePlanGmu`
 + A730 的三段区域解析，返回 success、15 个块，ITCM 段 0x1dc、0x4000 段 0xdcac、
@@ -268,12 +273,17 @@ $ nm -u sa-0183.o | grep -E 'ml_io_map|delay'
 - B. 由 boot payload 追加一段、按 boot-arg 传物理地址：补丁干净，但要改 `mkpayload`/shim；
 - C. 先不做，M3 继续只读。
 
-建议 A：和上游同构、排错时不用对齐两套打包逻辑，代价只是仓库里多一个固件数组文件。
+**决定：A，已落地（`0184-k60-adreno-gmu-firmware.patch`）。**
 
-方案 A 的脚手架已经跑通（未接进构建、未提交固件数组本身）：
-`tools/mk-gmu-fw.py gpu-fw/gmu_gen70000.bin > SweetAdrenoGmuFw.h`
-生成 57,272 字节 → 296,216 字节头文件，脚本会把生成的数组回读解析、
-与源文件逐字节比对（实测一致），头文件单独 g++ 编译通过。
+- `tools/mk-gmu-fw.py gpu-fw/gmu_gen70000.bin > SweetAdrenoGmuFw.h`：
+  57,272 字节 → 296,573 字节头文件（数组 + 4 段段表），生成时回读校验字节一致、
+  段表与长度自洽。
+- 0184 把 `iokit/Kernel/arm/SweetAdrenoGmuFw.h` 加进补丁序列，并在
+  `sweetadreno_fwinfo=1` 下只读打印：`firmware 57272 bytes in kernel, 4 segments`、
+  四段地址/长度/目标，以及从数组里读出的向量表
+  （实测 `sp=0x10007f80 pc=0x105 plausible`）。整个过程零 MMIO，可以和 M1 同一次启动验掉。
+- **上传本身还没做**：cache 段（0xdcac 字节）必须落在 GPU 可见内存、HFI 队列需要
+  IOVA，这要 kgsl SMMU；在那之前写 ITCM/CM3_SYSRESET 只是半条路，`0184` 不做。
 
 ## 13. CI 产物实测（2026-10-26，run 40276193603）
 
@@ -307,63 +317,86 @@ artifacts/xnu-adreno-m1m3.img        16,896,000 字节   cmdline 含
                                      "sweetadreno=1 sweetadreno_stage=3"
 ```
 
-## 14. CI 日志里挖到的一件事：0168 从来没打上过
+## 14. 0168 的处置：已删除（有成本与价值的取证）
 
-日志抓取本身有限制（GitHub 的日志包是 chunked 流、不支持 Range，单流经常在 4MB 左右被
-`HTTP/2 stream reset (0x8 CANCEL)` 掐断）。换成按 zip 局部头 + data descriptor 解析截断包，
-拿到了 `build/7_Build.txt` 前 80,462 行（覆盖 05:48:23→05:52:59，失败在 05:53:52）：
+`0168-k60-grant-logd-priv.patch` 从落地起每次都被跳过：
 
 ```
-05:49:36 [warning] Skipping patch .../dxb/patches/0168-k60-grant-logd-priv.patch
+05:49:36 [warning] Skipping patch .../0168-k60-grant-logd-priv.patch
          (already upstream, previously applied, or malformed):
          error: patch failed: bsd/kern/sweet_amfi.c
 05:49:36 error: bsd/kern/sweet_amfi.c: patch does not apply
-05:52:10 [arm64 sweet] C++ SweetAdreno.cpo        ← 我们的文件编过了
 ```
 
-两个事实：
+**成本取证**（决定要不要为省时间而删）：CI 日志里补丁循环从 05:49:34.859 到
+05:49:36.817，**155 条补丁合计 1.96 秒，单条中位 10.7ms**。跳过的补丁同样只花一次
+`git apply --check` 的钱，删掉省下 ~0.01 秒，对一次 ~330 秒的构建可以忽略。
+所以「加编译时间」这条不成立。
 
-1. **整轮里只有 0168 一个补丁被跳过**，我们的 `SweetAdreno.cpp` 正常编译（这条也反过来
-   证明 0183 的 `extern "C"` 修复有效——否则会在这里报链接错误）。
-2. **0168 的上下文和当前树对不上**：0168 写的是"把 blanket grant 收窄成只给
-   `PRIV_GLOBAL_PROC_INFO`"，而 `0064-sweet-priv-work-interval.patch` 早就把同一个函数
-   写成了"只放行 `PRIV_WORK_INTERVAL`，其余一律 EPERM"。0168 期待的
-   `granted` 版本在序列里根本不存在，所以它从落地起就没生效过。
+**价值取证**：它想授的是 `PRIV_GLOBAL_PROC_INFO`（logd 读别的进程记账）。而当前树
+（`0064` 之后）是「只放行 `PRIV_WORK_INTERVAL`，其余一律 EPERM」，这个状态下项目
+已经跑到 SpringBoard、守护进程正常——说明这个权限**不是**启动所需；反过来，宽授权
+（`7e79868` 记录的那版）会让启动在几秒内死掉，是有害的。
 
-当前树（`ci/xnu/bsd/kern/sweet_amfi.c:327`）的实际行为：
+**定论：无价值 → 删除**（`git rm` 语义，理由留在本条）。同时不再把它写进任何待办。
+删掉之后树里 `sweet_sandbox_priv_grant` 仍是已验过的 deny-all 版本，行为零变化。
 
-```c
-if (priv == PRIV_WORK_INTERVAL) return 0;
-... 记录后 return EPERM;          /* PRIV_GLOBAL_PROC_INFO 也被拒 */
-```
+### 14.1 日志抓取的限制（记录在案）
 
-影响评估：**不是致命**——这个 deny-all 状态下已经跑到 SpringBoard（有记录），说明 logd
-拿不到 `PRIV_GLOBAL_PROC_INFO` 不阻断启动。但提交 `7e79868` 想做的事（给 logd 那一个
-特权）并没有进内核，仓库里留着一个"看起来有、实际没有"的补丁是隐患。
-
-可选处理（待定，见 §15）：A 补一个对上当前树的授权补丁并删掉 0168；B 只删 0168，
-保持当前已验过的 deny-all；C 不动，仅在文档标注。
-
-### 14.1 日志尾巴拿不到（记录在案，不阻塞）
-
-两种协议都在 ~4MB 处被掐断，说明是链路/服务端对流长度的限制，不是 curl 参数问题：
+两种协议都在 ~4MB 处被掐断，是链路/服务端对流长度的限制，不是 curl 参数问题：
 
 ```
-HTTP/2: curl: (92) HTTP/2 stream 1 reset by server (error 0x8 CANCEL)   4,034,712 字节处
-HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading   3,999,387 字节处
+HTTP/2 : curl: (92) HTTP/2 stream 1 reset by server (error 0x8 CANCEL)  4,034,712 字节处
+HTTP/1.1: curl: (56) OpenSSL SSL_read: unexpected eof while reading     3,999,387 字节处
 ```
 
-所以 `05:53:52` 那一刻（Build 失败点）的原文这一侧拿不到。可用的替代：
-在有高速链路的机器上 `gh run view 40276193603 --log-failed`，或开 FlClash 后重跑
-（本机当前 7890 未监听、无 TUN）。**不需要它也能继续**：内核产物已 `NOUNDEFS` 且含
-0181/0182 字符串，说明失败发生在内核产出之后。
+`05:53:52` 那一刻（Build 失败点）的原文这一侧拿不到；`gh run view <id> --log-failed`
+在高速链路上可取。**不阻塞**：内核产物已 `NOUNDEFS` 且含 0181/0182 字符串，说明失败
+发生在内核产出之后。
 
 ## 15. 待拍板清单（2026-10-26 收尾）
 
 | # | 事项 | 选项 | 建议 |
 |---|---|---|---|
-| 1 | GMU 固件进内核（M3 前置） | A 编 C 数组（~296KB 补丁）／B boot payload 段／C 先只读 | A |
-| 2 | 0168 失效怎么收尾 | A 补授权补丁 + 删 0168／B 只删 0168（保持已验行为）／C 只标注 | B |
-| 3 | 是否把这些提交推到远端 | 推／不推 | 推，推完 CI 会给出带 0184 的内核 |
+| 1 | GMU 固件进内核（M3 前置） | **已定 A：编成 C 数组**（0184 落地） | 已执行 |
+| 3 | 是否把这些提交推到远端 | 推／不推 | 推，推完 CI 出带 0184 的内核 |
 
-第 3 项需要你放行；前两项不影响现有镜像（`artifacts/xnu-adreno-m1m3.img` 已可刷）。
+第 3 项等内存侧把提交归属理完再一次性推；现有镜像
+（`artifacts/xnu-adreno-m1m3.img`）已可刷，不含 0184。
+
+## 16. 本轮最终状态（2026-10-26 收尾）
+
+| 项 | 状态 |
+|---|---|
+| 补丁序列 | 0179 探测 → 0180 时钟语义 → 0181 预检/验证 → 0182 分阶段/快照 → 0183 C 链接 → 0184 固件入内核（`0168` 已删） |
+| 本地自测 | `./run.sh 0184` 14 项全过；GMU 引导模型 11 项全过 |
+| CI 内核 | `artifacts/kernel-adreno-0183.sweet`（17,303,824 字节，`NOUNDEFS`，含 0179–0183） |
+| 可刷镜像 | `artifacts/xnu-adreno-m1m3.img`，cmdline `sweetadreno=1 sweetadreno_stage=3` |
+| 未推 | 本轮全部提交（等内存侧修完归属） |
+| M3 上传 | 未实现，卡在 kgsl SMMU（下一个大件） |
+| 真机任何读数 | **unverified**，判据见 §5 / §8 / §16.1 |
+
+### 16.1 设备回来后的执行顺序
+
+```
+cd ~/hackios
+# 1) 用最新内核重打镜像（含 0184 时需要重新拉 CI 产物）
+K60_CMDLINE_EXTRA="sweetadreno=1 sweetadreno_stage=3 sweetadreno_fwinfo=1" \
+  ./tools/k60-build-boot.sh artifacts/kernel-<最新>.sweet artifacts/xnu-adreno.img
+fastboot boot artifacts/xnu-adreno.img          # M1+M2+M3 只读，一次启动
+
+# 2) 日志
+./tools/k60-log-pull.sh                         # TWRP 里
+python3 tools/k60-log-summary.py <log>
+
+# 3) 按顺序读判据
+#    fw vector sp=0x10007f80 pc=0x105 plausible   → 内核里那份固件对
+#    probe done                                    → M1 通过
+#    snapshot[pre-power] …                         → 上电前现场
+#    GPUCC verified: n/7 branches running          → M2 结果（0/7 = 失败）
+#    GMU is held in reset / FW_INIT / HFI          → M3 现状
+# 4) 只有上面都绿，才谈 M3 上传（需要 SMMU 先落地）
+```
+
+判据速查：`gpucc[i]` 全 `0xffffffff` = 该块无时钟/NoC 错；`GDSC is owned by firmware`
+= bootloader 已上电（好消息，看 preflight 的 n/7）；`0/7 branches running` = 时钟没起来。

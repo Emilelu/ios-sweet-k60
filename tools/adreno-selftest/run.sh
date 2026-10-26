@@ -13,6 +13,9 @@ mkdir -p "$HERE/build"
 python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$TREE"
 python3 "$HERE/extract.py" "$REPO" "$TREE" "$TAG"
 cp "$TREE/iokit/Kernel/arm/SweetAdreno.cpp" "$HERE/build/SweetAdreno.cpp"
+if [ -f "$TREE/iokit/Kernel/arm/SweetAdrenoGmuFw.h" ]; then
+	cp "$TREE/iokit/Kernel/arm/SweetAdrenoGmuFw.h" "$HERE/build/"
+fi
 
 clang++ --target=aarch64-none-elf -std=c++17 -O2 -DSWEET -I "$HERE/stubs" -ffreestanding \
         -fno-exceptions -fno-rtti -c "$HERE/build/SweetAdreno.cpp" \
@@ -25,9 +28,15 @@ echo "[2/3] aarch64 目标编译通过（保留 dsb sy 内联汇编）"
 BAD=$(nm -u "$HERE/build/SweetAdreno-aarch64.o" | awk '{print $NF}' \
       | grep '^_Z' | grep -vE '^_Zd[la]P|^_Zn[aw]m' || true)
 if [ -n "$BAD" ]; then
-	echo "  FAIL 未定义符号里还有 C++ 修饰名（漏了 extern \"C\"）："
-	echo "$BAD" | sed 's/^/       /'
-	exit 1
+	if [ "${K60_ALLOW_MANGLED:-0}" = 1 ]; then
+		# 只在回看历史版本（0179-0182）时放行，用来对比时钟语义
+		echo "  警告：符号被 C++ 修饰（历史版本，K60_ALLOW_MANGLED=1 放行）："
+		echo "$BAD" | sed 's/^/       /'
+	else
+		echo "  FAIL 未定义符号里还有 C++ 修饰名（漏了 extern \"C\"）："
+		echo "$BAD" | sed 's/^/       /'
+		exit 1
+	fi
 fi
 echo "      C 符号名未修饰（链接期不会找不到）：$(nm -u "$HERE/build/SweetAdreno-aarch64.o" \
 	| awk '{print $NF}' | grep -vE '^_Z' | tr '\n' ' ')"
@@ -88,6 +97,12 @@ fi
 if grep -q 'sweetadreno_stage' "$HERE/build/SweetAdreno.cpp"; then
 	runx happy   "sweetadreno=1,sweetadreno_stage=3" "GMU firmware has not reported FW_INIT OK"
 	runx gmulive "sweetadreno=1,sweetadreno_stage=3" "HFI is up"
+fi
+
+# 0184 起才有固件自检（只读，不碰 MMIO）
+if grep -q 'sweetadreno_fwinfo' "$HERE/build/SweetAdreno.cpp"; then
+	runx happy "sweetadreno=1,sweetadreno_fwinfo=1" "firmware 57272 bytes in kernel, 4 segments"
+	runx happy "sweetadreno=1,sweetadreno_fwinfo=1" "fw vector sp=0x10007f80 pc=0x105 plausible"
 fi
 
 # M3 预演：真固件 + GMU 引导/失败分支模型（不是内核代码，见 gmu-model.c）
