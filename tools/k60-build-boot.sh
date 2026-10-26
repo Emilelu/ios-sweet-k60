@@ -16,18 +16,33 @@ PAYLOAD=/tmp/k60-payload-$$.bin
 
 cleanup() { :; }
 
-ADT_PHYS_BASE=0xb4000000 ADT_MEM_SIZE=0x2c000000 \
+# MEMPLAN picks the ADT DRAM window (see MEMORY-PLAN.md). p0 is the 2026-10-25
+# layout that boots; p1/p2 are the wider windows and need 0184 (ram notches).
+# The dram-size is always 1 MiB smaller than the window: the top MiB is the
+# embedded panic log.
+case "${MEMPLAN:-p0}" in
+p0) ADT_BASE=0xb4000000; ADT_WINDOW=0x2c000000 ;;   # 704 MiB, +74 MiB below gunyah
+p1) ADT_BASE=0xb4000000; ADT_WINDOW=0x315f0000 ;;   # 790 MiB, same base, new top
+p2) ADT_BASE=0xa3000000; ADT_WINDOW=0x425f0000 ;;   # 1063 MiB, payload in the low hole
+*)  echo "unknown MEMPLAN '${MEMPLAN}' (p0|p1|p2)" >&2; exit 2 ;;
+esac
+ADT_DRAM=$((ADT_WINDOW - 0x100000))
+echo "mem plan: ${MEMPLAN:-p0}  adt dram ${ADT_BASE}+$(printf '0x%x' $ADT_DRAM)"
+
+ADT_PHYS_BASE=$ADT_BASE ADT_MEM_SIZE=$ADT_WINDOW \
     python3 "$HACKIO/ios-sweet/tools/mkadt.py" "$ADT" --k60 >/dev/null
 
-python3 - "$ADT" <<'PY'
+python3 - "$ADT" "$ADT_BASE" "$ADT_DRAM" <<'PY'
 import struct, sys
 d = open(sys.argv[1], 'rb').read()
-base = struct.pack('>Q', 0xb4000000)[::-1]
-size = struct.pack('>Q', 0x2bf00000)[::-1]
+base_i, dram_i = int(sys.argv[2], 0), int(sys.argv[3], 0)
+base = struct.pack('>Q', base_i)[::-1]
+size = struct.pack('>Q', dram_i)[::-1]
 if base not in d or size not in d:
-    sys.exit('ADT check failed: expected dram-base 0xb4000000 and dram-size 0x2bf00000')
+    sys.exit('ADT check failed: expected dram-base %#x and dram-size %#x' % (base_i, dram_i))
 
-print('ADT ok: dram 0xb4000000 + 0x2bf00000 (703 MiB), panel buffer inside it')
+print('ADT ok: dram %#x + %#x (%d MiB), panel buffer inside it'
+      % (base_i, dram_i, dram_i >> 20))
 PY
 
 # K60_CMDLINE_EXTRA：追加到标准 cmdline 后（例如 "sweetadreno=1"），
