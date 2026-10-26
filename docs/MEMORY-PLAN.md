@@ -1,6 +1,6 @@
 # K60 内存计划：703 MB 是不是天花板
 
-> 同源副本：`~/hackios/MEMORY-PLAN.md`（本轮新增，两边内容一致）。
+> 同源副本：`~/hackios/MEMORY-PLAN.md`（两边内容一致；§10 为第二轮追加）。
 
 2026-10-26 离线轮。设备不在手，本篇所有结论分成三类并明确标注：
 
@@ -316,6 +316,15 @@ P1/P2 的价值在于"多 75/337 MiB 换来不再频繁 jetsam"，不是"解决�
 | `k60-repo-full/tools/k60-build-boot.sh`、`~/hackios/tools/k60-build-boot.sh` | 加 `MEMPLAN=p0\|p1\|p2`（默认 p0，行为与之前一致；已实测三种都能出 ADT） |
 | `~/hackios/MEMORY-PLAN.md` | 本篇 |
 
+第二轮（同一轮任务的后半段）追加：
+
+| 文件 | 说明 |
+|---|---|
+| `MEMORY-PLAN.md` §10 | 新增「Android 多段内存对照」：Linux 五层机制、XNU 四处改动、A/B/C 三条路线与 P4 的空闲页账 |
+| `tools/memplan-selftest/memplan.py` | 加 P4（experimental，整机单 span），带 6 段 `extra_notches`；`account()` 支持显式 `end` |
+| `tools/memplan-selftest/sim.c` | 数组连续性判据从"首尾两页"加强到"`[start, first)` 每一页都不在 notch 里"，P4 因此当场被挡住 |
+| `tools/memplan-selftest/check.py` | 实验方案跳过接受性判据（仍在 `--plans` 里打印账） |
+
 没动：`SweetAdreno.cpp`、`0180*`、`tools/adreno-selftest/`、`GPU-PORT-NOTES.md`、
 `shim/shim.c`、远端（无 push）。
 
@@ -327,3 +336,147 @@ cd k60-repo-full/tools/memplan-selftest && ./run.sh
 
 它会重算物理表、跑页面模型、检查 0184 的 notch 覆盖、验证 mkadt 生成的 ADT，
 并用三次坏窗口和一次真实启动（55885 页）做正反对照。
+
+---
+
+## 10. Android 多段内存对照（Linux 怎么做，XNU 能不能照做）
+
+同样一台机器、同样被 carve-out 切碎、同样有一大段没有 DRAM 的空洞，Android/Linux 用到了
+8.2 GiB，XNU 只有 644.9 MiB。这一节把差距拆到机制层，然后给出"照做"的代价。
+
+Linux 侧引用 `torvalds/linux` **v6.1** 的源码；本机 Android 的内核版本从
+`dump/parts/boot_a.kernel` 里读出来是 **`5.10.237-android12-9`**，这几层机制在 5.10 和 6.1
+里是同一批函数（行号按 v6.1，旁边都写了函数名，版本漂移不影响结论）。没有在源码里对上的
+一律标 `unverified`。
+
+### 10.1 结论
+
+1. **Android 能用到 8.2 GiB，其中 6.9 GiB 在 4 GiB 以上**（`dump/iomem.txt`：
+   `0x800000000+885M`、`0x837b00000+30M`、`0x840000000+6G`）。所以"AP 只能看 1.3 GiB"
+   是**我们这条启动路径**的现状，不是这个 SoC 的内存容量上限。
+2. Linux 能吃多段是四层机制合起来：memblock 多 region 登记、reserved / nomap 两级排除、
+   线性映射只覆盖 present、page 元数据按 128 MiB section 稀疏。zone 只是"PFN 区间 +
+   absent 计数"，所以天然跨 bank，不需要任何特殊结构。
+3. XNU 缺的只有两条：**登记**（`boot_args` 只有一组 base/size）和 **page 元数据的稀疏**
+   （vm_page 数组按 span 走，洞里也要 struct）。"洞不映射"这条 XNU 反而更粗暴 ——
+   physmap 是连续线性映射、跨洞照映射，靠 notch 保证不碰。
+4. 本机的分水岭不是"支不支持多段"，而是 **4 GiB 以上的 bank 到底解不解码**。唯一一次探针
+   打的是 `0x1_00000000`，而 4 GiB 到 32 GiB 之间是 **28 GiB 的 DRAM 空洞**（DTS 里没有
+   任何 bank 覆盖它）。用"洞里的地址中止"推出"4 GiB 以上全不可访问"是不成立的，
+   标 `needs-device`（§10.5）。
+5. 若高 bank 可读：**2 个补丁**（扩 notch 表 + ADT 窗口、让 vm_page 数组能落到别处）就能
+   拿到 **10.45 GiB**（§10.4 的 P4），代价是 196 MB 元数据 + 39 GiB physmap。
+   若高 bank 不可读：多段是零收益，**0184 就是终点**。
+
+### 10.2 Linux 侧：五层机制
+
+| 层 | 代码（v6.1） | 做什么 | 对本机的含义 |
+|---|---|---|---|
+| ① 登记 | `drivers/of/fdt.c: early_init_dt_scan_memory()` L1100 | 遍历**所有** `device_type = "memory"` 的子节点，节点内**每个** `reg` 对都调 `early_init_dt_add_memory_arch()`；`linux,usable-memory` 可覆盖 `reg`；`hotpluggable` → `memblock_mark_hotplug()` | 本机 DTS 一个 `/memory` 节点里塞了 6 组 reg，全部会被登记 |
+| ② 归一 | `drivers/of/fdt.c: __weak early_init_dt_add_memory_arch()` L1218；`arch/arm64/include/asm/memory.h` L209 `MIN_MEMBLOCK_ADDR 0` / `MAX_MEMBLOCK_ADDR U64_MAX`；`mm/memblock.c: memblock_add()` L709 → `memblock_add_range()` L577 | 页对齐、裁掉越界、**允许重叠、相邻同属性 region 自动合并** | 高 bank 的 `0x840000000+3G` 与 `0x900000000+6G` 是紧邻的两段，合并成 `0x840000000-0xa7fffffff`（和 iomem 完全一致） |
+| ③ 排除 | 固定 reg：`drivers/of/fdt.c: __reserved_mem_reserve_reg()` L501 读 `reg` 与 `no-map`，调 `early_init_dt_reserve_memory_arch()` L490（`if (nomap) memblock_mark_nomap(); else memblock_reserve();`）。动态池：`drivers/of/of_reserved_mem.c: __reserved_mem_alloc_size()` L83 → `early_init_dt_alloc_reserved_memory_arch()` L33（同样按 `nomap` 分叉） | **reserved**：页还在 `memblock.memory` 里、线性映射照建、struct page 照建，只是不进 buddy；**nomap**：`MEMBLOCK_NOMAP`（`include/linux/memblock.h` L36-48 "don't add to kernel direct mapping"），被 `should_skip_region()`（`mm/memblock.c` L982，L1004 "skip nomap memory unless we were asked for it explicitly"）默认跳过 → **既没映射也没 struct page** | 我们的 38 个 carve-out 里 36 个带 `no-map`（splash 与 ramoops 不带）。在 Linux 眼里它们连元数据都不存在 |
+| ④ 映射 | `arch/arm64/mm/init.c: arm64_memblock_init()` L266（`memstart_addr = round_down(memblock_start_of_DRAM(), ARM64_MEMSTART_ALIGN)`）；`arch/arm64/mm/mmu.c: map_mem()` L524 | `for_each_mem_range()` **只映射 memblock.memory 的段**，洞在页表里就是空的；kernel text 临时标 nomap 防止出现可写别名 | 28 GiB 的洞在 Linux 里是"页表没有这一项"，不是"映射了但不许访问"。XNU 相反：`physmap` 一个线性映射跨到底（`arm_vm_init.c: arm_vm_physmap_init()` 的 `real_avail_end - topOfKernelData`） |
+| ⑤ 元数据 | `arch/arm64/include/asm/sparsemem.h` `SECTION_SIZE_BITS 27`；`mm/sparse.c: sparse_init()` L559 | 只对 `for_each_present_section_nr()` 的 section 调 `__populate_section_memmap()` 建 vmemmap；空 section 只有 `struct mem_section`，没有 `struct page` | 28 GiB 洞在 Linux 里 **0 字节**元数据；XNU 按 span 走，洞里每 16 KiB 要 80 字节（P4 = 196 MB） |
+
+补充一条容易被忽略的：**zone 跨 bank 不需要任何代码**。`mm/page_alloc.c:
+calculate_node_totalpages()` L7549 里 `zone->spanned_pages` 覆盖
+`[node_start_pfn, node_end_pfn)`（含洞），`zone->present_pages = spanned - absent`，
+absent 由 `zone_absent_pages_in_node()` 扣掉不存在的 PFN 区间。一个 `ZONE_NORMAL`
+可以从低 bank "跨"到 42 GiB，中间 28 GiB 只是 `absent`；buddy 的 PFN 遍历靠
+`pfn_valid()`（section 表）而不是连续扫描。
+
+### 10.3 XNU 侧：要动哪四处（以及一处不能动的）
+
+| # | 位置 | 现在 | 多段要变成 | 影响面 |
+|---|---|---|---|---|
+| 1 | `osfmk/arm64/arm_vm_init.c: arm_vm_init()` L2000/2017/2021 | `avail_start = topOfKernelData`、`avail_end = gPhysBase + mem_size`、`real_avail_end = gPhysBase + real_phys_size`，三对全局标量 | bank 表 + 每 bank 的 [start,end) | 启动路径，改动局部但影响 pmap/VM 的所有下游计数 |
+| 2 | `osfmk/arm/pmap/pmap.c: initialize_ram_ranges()` L2593 / `pmap_next_page()` L2637 | `avail_page_count = atop(end - first)`；`pmap_next_page()` 严格 `first_avail += PAGE_SIZE` | 多段游标（bank index + offset） | pmap 取页，所有早期分配都走它 |
+| 3 | `osfmk/vm/vm_page.h: VM_PAGE_GET_PHYS_PAGE()`（arm64 分支 L422） | `return (m - vm_page_array_beginning_addr) + vm_first_phys_ppnum;` —— **数组下标就是页号** | 每 bank 一张 ppnum→下标表（或在宏里二分） | 全局最热宏，见下 |
+| 4 | `osfmk/vm/vm_resident.c: pmap_startup()` L1415 | `npages = span/(PAGE+sizeof(vm_page))`；数组一次性 `pmap_steal_freeable_memory()`；线性建页 | Σ present 页 + 每 bank 起步 | VM 启动 |
+| — | `osfmk/arm64/arm_vm_init.c: phystokv()` L370 | 先查 `ptov_table`（8 项，`arm_vm_physmap_slide()` L1486 按 VA 顺序拼，不是任意 PA 重映射），否则线性 `pa - gPhysBase + gVirtBase`，越界 panic | 第二段在 `real_phys_size` 之外就要改它 | 全内核 |
+
+第 3 条是真正的墙，值得单独说清楚：
+
+```c
+/* osfmk/vm/vm_page.h, __arm64__ */
+static inline ppnum_t
+VM_PAGE_GET_PHYS_PAGE(vm_page_t m)
+{
+	if (m >= vm_page_array_beginning_addr && m < vm_page_array_ending_addr) {
+		return (ppnum_t)((uintptr_t)(m - vm_page_array_beginning_addr) + vm_first_phys_ppnum);
+	} ...
+}
+```
+
+页号是"数组下标 + 一个全局基址"算出来的，所以数组**不能有洞**（`0170` 的血泪）
+也**不能跳过一段**。而且页队列的指针编码也是数组内偏移：
+`vm_page_pack_ptr()`（同文件 L492）把 `p - vm_page_array_beginning_addr` 或上
+`VM_PAGE_PACKED_FROM_ARRAY (0x80000000)` —— 只放得下**一个**数组的 31 位偏移量。
+想开第二个数组就得改这套编码，等于动 `vm_page.h` 里所有队列宏。
+
+**所以"多段"在 XNU 里有两种含义，代价差一个数量级：**
+- (i) 多段落在**同一个 span** 里 → 不需要改任何 pmap 代码，`0184` 的 notch 就是全部答案；
+- (ii) 多段超出 span → 上面 4 处 + 页指针编码，4–6 个补丁。
+
+### 10.4 三条路线与代价
+
+| | A 现状 / 0184 | B 单 span 拉到 42 GiB（P4） | C 真·多段 |
+|---|---|---|---|
+| 改什么 | ADT 窗口 + notch 表 | ADT 窗口 + notch 表加 6 段 + **vm_page 数组落点** | bank 表（ADT/boot_args）+ 4 处 pmap/VM 代码 + 页指针编码 |
+| 补丁数 | 1（`0184`，已写） | 2 | 4–6 |
+| vm_page 元数据 | 3.7 MB | **196 MB**（12 552 页） | ~40 MB（8.2 GiB/204） |
+| physmap | 1.2 GiB | **39 GiB**（跨 28 GiB 洞） | 8.2 GiB |
+| 空闲页（模型） | 644.9 → 982.3 MiB | **10 702.4 MiB** | 同上 |
+| 风险 | 低，已在跑 | 中高：VA 与元数据都要抢；数组必须物理连续 | 高：动最热宏与启动路径 |
+| 前提 | 无 | 4 GiB 以上能解码 | 同 B |
+
+P4 的数字是模型算的（`memplan.py --plans`），但**模型当场就把 P4 挡住了**：
+
+```
+sim: vm_page array [0xa54e0000,0xb1900000) runs into a notch at 0xa6b80000
+```
+
+原因很实在：`pmap_steal_freeable_memory()` 是**从窗口底部连续**抠页的，P4 要 196 MB，
+而 `0xa54e0000` 往上只有 22.6 MiB 就撞上 xbl_ramdump 的 carve-out。也就是说 B 路线
+不能只改 ADT —— 还得让数组能落到窗口里别处的干净连续区（改
+`pmap_steal_freeable_memory()`/`pmap_next_page()`，1 个补丁），这就是"2 个补丁"的由来。
+只压到 P2 是 5.2 MB，那段 17.6 MiB 的空闲区刚好装得下，所以 P2 不受影响。
+
+C 路线贵在哪：`VM_PAGE_GET_PHYS_PAGE()` 要变成"每 bank 一张表"（或在宏里查表），
+`pmap_next_page()` 要状态机，`pmap_startup()` 的 npages 要按 present 页算，
+`phystokv()` 的 `ptov_table`（8 项、按 VA 顺序拼）表达不了任意第二段，还有
+`boot_args`/ADT 的 bank 表。换来的是元数据 196 MB → 40 MB、physmap 39 GiB → 8.2 GiB。
+
+### 10.5 分水岭：一次上机探针（needs-device）
+
+现有证据只有一条：`PLAN-REMAINING.md` 记的 `FAR=0x100000000` 同步外部中止，
+而 `K60_RDCHECK` 的 `addrs[]` 是 `{0x100000000, 0x180000000, 0x1c0000000, 0x80000000,
+0xb4000000}` —— **前三个全在 28 GiB 的洞里**。与此同时 Android 的 iomem 把
+`0x840000000-0xa7fffffff` 记成 System RAM。
+
+两种解释，一次探针就能分开：
+
+| 解释 | 现象 | 后续 |
+|---|---|---|
+| (a) XPU/TZ 只把高 bank 授权给 Android 的 VMID，fastboot 载荷拿不到 | `0x840000000` 也中止 | 停止；`0184` 是终点，B/C 都别做 |
+| (b) 高 bank 本来就通，之前的探针打在洞里 | `0x840000000` 读出值 | 值得做 B（2 个补丁）或 C；先 B |
+
+探针：把 `ios-sweet/shim/shim.c` 里 `K60_RDCHECK` 的 `addrs[]` 换成
+`0x100000000, 0x800000000, 0x837b00000, 0x840000000, 0x900000000, 0xa69b77000,
+0xa7400000, 0xb4000000`，编译加 `-DK60_RDCHECK`，屏上逐行打印读到的值；
+**第一个不出现的行就是第一个不可解码的地址**（读会中止，没有异常向量，屏定格）。
+判据：`0x840000000` 有值 → 解释 (b)；`0x840000000` 之前就停 → 解释 (a)。
+
+注意这是 MMU off / Device 属性下的读，只能证伪。真要当 DRAM 用，还得在 XNU 的
+Normal cacheable 下过一遍 —— 但 `pmap_startup()` 只对页做 `vm_page_init()`（写
+struct，不碰页内容），第一处真正的内容访问发生在页被分配出去之后，所以风险可控：
+真踩上去会是那个熟悉的 `ESR=0x96000010` + 无声挂死，`vm_page_bootstrap` 的页数
+会先把线索留在屏幕/日志里。
+
+### 10.6 对 0184 的影响
+
+**没有影响，也不需要重做。** 0184 管的是"span 内哪些页不许进空闲队列"，无论以后走
+B 还是 C 都还是这套语义：B 只是在同一张表里再加 6 段（`memplan.py` 的 P4
+`extra_notches` 就是这 6 段，可以直接抄），C 则要在 bank 表之上继续用它。
+唯一需要注意的是：如果 4 GiB 以上确认不可读，那 §10 的结论就收敛成
+"`0184` 已是该平台的上限，别再往 4 GiB 以上打主意"。

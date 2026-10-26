@@ -11,6 +11,10 @@
   5 段 notch 表）。**0184 必须先进内核**，否则抬窗口就会踩 gunyah → 无声挂死。
 - 上机判据：`vm_page_bootstrap` 页数应为 **46042（P1）/ 62869（P2）**，不是 41272。
 - 细节、地址表、needs-device 清单全在 `MEMORY-PLAN.md`。
+- **§10 新增「Android 多段内存对照」**：Android 在同一台机器上用到 8.2 GiB（6.9 GiB 在
+  4 GiB 以上），Linux 靠 memblock 多段 + reserved/nomap + 稀疏 section 做到；XNU 缺的只是
+  登记和稀疏元数据。**但 4 GiB 以上的"墙"其实没验证过**——之前探的 `0x100000000` 是 28 GiB
+  空洞。一次 `K60_RDCHECK` 探针（读 `0x840000000`）决定要不要走 B 路线（2 个补丁、10.45 GiB）。
 
 ## 2026-10-26 收尾：当前状态与设备回来后的顺序
 

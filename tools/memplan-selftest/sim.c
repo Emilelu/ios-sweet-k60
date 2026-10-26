@@ -107,11 +107,17 @@ int main(int argc, char **argv)
 	uint64_t first = start + array_pages * PAGE;
 	uint64_t notched_pages = 0, free_pages = 0;
 
-	/* pmap_steal_freeable_memory() lands on the bottom of the window: if a
-	 * notch covered it, the array itself would be in firmware memory. */
-	if (notched(first) || notched(first + array_pages * PAGE - 1)) {
-		fprintf(stderr, "sim: vm_page array falls inside a notch\n");
-		return 1;
+	/* pmap_steal_freeable_memory() takes the array from the bottom of the
+	 * window in one physically contiguous run, so *every* page of
+	 * [start, first) must be real DRAM. One notch in the middle would put
+	 * vm_page structs on firmware memory. */
+	for (uint64_t pa = start; pa < first; pa += PAGE) {
+		if (notched(pa)) {
+			fprintf(stderr, "sim: vm_page array [%#llx,%#llx) runs into "
+			    "a notch at %#llx\n", (unsigned long long)start,
+			    (unsigned long long)first, (unsigned long long)pa);
+			return 1;
+		}
 	}
 
 	for (uint64_t pa = first; pa < end; pa += PAGE) {

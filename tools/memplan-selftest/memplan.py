@@ -189,12 +189,29 @@ PLANS = [
     dict(name='P2', base=0xa3000000, adt_mem=0x425f0000, panic=0x100000,
          title='payload moved into the 61.5 MiB hole at 0xa2e00000',
          patch='0184 + ADT window only'),
+    # P4 is the "if Android can, why can't we" arithmetic, not a plan: one span
+    # from the low hole to the top of the last DRAM bank (42 GiB), with every
+    # non-DRAM / firmware range notched. It is only reachable if the banks above
+    # 4 GiB decode for the AP at all -- see MEMORY-PLAN.md section 10.
+    dict(name='P4', base=0xa3000000, end=0xa7ff00000, panic=0x100000,
+         title='EXPERIMENT: whole device in one span (needs >4 GiB to decode)',
+         patch='0184 + notch table for 28 GiB of holes',
+         experimental=True,
+         extra_notches=[
+             [0xe55f3000, 0xe5700000, 'trust_ui_vm'],
+             [0xe5c00000, 0xea000000, 'linux_reserved+tz_stat+tags+qtee'],
+             [0xea000000, 0xf4600000, 'no DRAM'],
+             [0xf5000000, 0xffc00000, 'linux reserved'],
+             [0x100000000, 0x800000000, 'no DRAM (28 GiB hole)'],
+             [0xa69b78000, 0xa7ff00000, 'high-bank reserved (gunyah?)'],
+         ]),
 ]
 
 
 def account(plan, notches, foot=KERNEL_FOOT):
     base = plan['base']
-    end = base + plan['adt_mem'] - plan['panic']
+    all_notches = list(notches) + [list(n) for n in plan.get('extra_notches', [])]
+    end = plan['end'] if plan.get('end') else base + plan['adt_mem'] - plan['panic']
     panic_base = end
     start = base + foot
     span = end - start
@@ -209,20 +226,21 @@ def account(plan, notches, foot=KERNEL_FOOT):
         lo, hi = max(lo, first), min(hi, end)
         return max(0, (hi - lo) // PAGE)
 
-    notch_pages = sum(notched(lo, hi) for lo, hi, _ in notches)
+    notch_pages = sum(notched(lo, hi) for lo, hi, _ in all_notches)
     free_pages = (end - first) // PAGE - notch_pages
     return dict(plan=plan, start=start, end=end, panic_base=panic_base,
                 panic_end=panic_base + plan['panic'], span=span,
                 span_pages=span_pages, npages=npages, array_pages=array_pages,
                 first=first, notch_pages=notch_pages, free_pages=free_pages,
                 free_bytes=free_pages * PAGE,
-                adt_dram_size=plan['adt_mem'] - plan['panic'])
+                adt_dram_size=(end - base),
+                notches=all_notches)
 
 
 def free_runs(acc, notches):
     """[lo,hi) byte runs that end up on a free list, from `first` to `end`."""
     runs, cur = [], acc['first']
-    for lo, hi, _ in sorted(notches):
+    for lo, hi, _ in sorted(acc.get('notches', notches)):
         lo, hi = max(lo, acc['first']), min(hi, acc['end'])
         if lo >= hi:
             continue

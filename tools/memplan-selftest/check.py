@@ -105,6 +105,10 @@ def main():
 
     print('\n[2/5] every carve-out inside a plan window is notched')
     for plan in M.PLANS:
+        if plan.get('experimental'):
+            print('  skip %s (experimental, section 10 of MEMORY-PLAN.md)'
+                  % plan['name'])
+            continue
         acc = M.account(plan, notches)
         required = M.carved_out(phys, acc['start'], acc['end'])
         missing = []
@@ -124,7 +128,7 @@ def main():
     print('\n[3/5] free pages are all inside iomem System RAM')
     for plan in M.PLANS:
         if plan.get('experimental'):
-            print('  skip %s (experimental, see MEMORY-PLAN.md)' % plan['name'])
+            print('  skip %s (experimental, MEMORY-PLAN.md section 10)' % plan['name'])
             continue
         acc = M.account(plan, notches)
         got = run_sim(acc['start'], acc['end'], notches)
@@ -153,7 +157,7 @@ def main():
     for plan in (M.PLANS if can_mkadt else []):
         acc = M.account(plan, notches)
         if plan.get('experimental'):
-            print('  skip %s ADT (experimental)' % plan['name'])
+            print('  skip %s ADT (experimental, MEMORY-PLAN.md section 10)' % plan['name'])
             continue
         blob, have = mkadt(plan['base'], plan['adt_mem'], os.path.join(tmp, plan['name'] + '.adt'))
         check(have(plan['base']) and have(acc['adt_dram_size']),
