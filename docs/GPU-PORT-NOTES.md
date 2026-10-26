@@ -306,3 +306,50 @@ artifacts/kernel-adreno-0183.sweet   17,303,824 字节   003-0183 的 CI 内核
 artifacts/xnu-adreno-m1m3.img        16,896,000 字节   cmdline 含
                                      "sweetadreno=1 sweetadreno_stage=3"
 ```
+
+## 14. CI 日志里挖到的一件事：0168 从来没打上过
+
+日志抓取本身有限制（GitHub 的日志包是 chunked 流、不支持 Range，单流经常在 4MB 左右被
+`HTTP/2 stream reset (0x8 CANCEL)` 掐断）。换成按 zip 局部头 + data descriptor 解析截断包，
+拿到了 `build/7_Build.txt` 前 80,462 行（覆盖 05:48:23→05:52:59，失败在 05:53:52）：
+
+```
+05:49:36 [warning] Skipping patch .../dxb/patches/0168-k60-grant-logd-priv.patch
+         (already upstream, previously applied, or malformed):
+         error: patch failed: bsd/kern/sweet_amfi.c
+05:49:36 error: bsd/kern/sweet_amfi.c: patch does not apply
+05:52:10 [arm64 sweet] C++ SweetAdreno.cpo        ← 我们的文件编过了
+```
+
+两个事实：
+
+1. **整轮里只有 0168 一个补丁被跳过**，我们的 `SweetAdreno.cpp` 正常编译（这条也反过来
+   证明 0183 的 `extern "C"` 修复有效——否则会在这里报链接错误）。
+2. **0168 的上下文和当前树对不上**：0168 写的是"把 blanket grant 收窄成只给
+   `PRIV_GLOBAL_PROC_INFO`"，而 `0064-sweet-priv-work-interval.patch` 早就把同一个函数
+   写成了"只放行 `PRIV_WORK_INTERVAL`，其余一律 EPERM"。0168 期待的
+   `granted` 版本在序列里根本不存在，所以它从落地起就没生效过。
+
+当前树（`ci/xnu/bsd/kern/sweet_amfi.c:327`）的实际行为：
+
+```c
+if (priv == PRIV_WORK_INTERVAL) return 0;
+... 记录后 return EPERM;          /* PRIV_GLOBAL_PROC_INFO 也被拒 */
+```
+
+影响评估：**不是致命**——这个 deny-all 状态下已经跑到 SpringBoard（有记录），说明 logd
+拿不到 `PRIV_GLOBAL_PROC_INFO` 不阻断启动。但提交 `7e79868` 想做的事（给 logd 那一个
+特权）并没有进内核，仓库里留着一个"看起来有、实际没有"的补丁是隐患。
+
+可选处理（待定，见 §15）：A 补一个对上当前树的授权补丁并删掉 0168；B 只删 0168，
+保持当前已验过的 deny-all；C 不动，仅在文档标注。
+
+## 15. 待拍板清单（2026-10-26 收尾）
+
+| # | 事项 | 选项 | 建议 |
+|---|---|---|---|
+| 1 | GMU 固件进内核（M3 前置） | A 编 C 数组（~296KB 补丁）／B boot payload 段／C 先只读 | A |
+| 2 | 0168 失效怎么收尾 | A 补授权补丁 + 删 0168／B 只删 0168（保持已验行为）／C 只标注 | B |
+| 3 | 是否把这些提交推到远端 | 推／不推 | 推，推完 CI 会给出带 0184 的内核 |
+
+第 3 项需要你放行；前两项不影响现有镜像（`artifacts/xnu-adreno-m1m3.img` 已可刷）。
