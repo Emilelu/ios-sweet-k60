@@ -61,6 +61,19 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys, vm_size_t size)
 
 extern "C" void delay(int us) { g_delay_us += us > 0 ? (unsigned long)us : 0; }
 
+/* 0190 起驱动会把 M3 的活儿交给内核线程并先睡一会儿；仿真台里同步跑，
+ * 睡眠只记账，日志落盘只记一次调用（真机上是把环写进 UFS）。 */
+static unsigned g_flush_calls;
+extern "C" void IOSleep(unsigned int ms) { g_delay_us += (unsigned long)ms * 1000UL; }
+extern "C" void sweet_log_flush_now(void) { g_flush_calls++; }
+extern "C" int kernel_thread_start(void (*func)(void *, int), void *arg, void **thread)
+{
+	func(arg, 0);
+	if (thread) *thread = (void *)1;
+	return 0;
+}
+extern "C" void thread_deallocate(void *thread) { (void)thread; }
+
 extern "C" int PE_parse_boot_argn(const char *name, void *out, int max)
 {
 	auto it = g_bootargs.find(name);

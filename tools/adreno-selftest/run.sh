@@ -43,7 +43,7 @@ echo "      C 符号名未修饰（链接期不会找不到）：$(nm -u "$HERE/
 
 # x86 仿真版：只换访问器、dsb 与 C 链接声明，寄存器逻辑一行不动
 python3 "$HERE/simify.py" "$HERE/build/SweetAdreno.cpp" "$HERE/build/SweetAdreno-sim.cpp"
-clang++ -std=c++17 -O1 -DSWEET -I "$HERE/stubs" -I "$HERE/build" -fno-exceptions -fno-rtti \
+clang++ -std=c++17 -O1 -DSWEET -DSWEET_HOST -I "$HERE/stubs" -I "$HERE/build" -fno-exceptions -fno-rtti \
         "$HERE/host.cpp" -o "$HERE/build/selftest"
 echo "[3/3] 仿真台编译通过"
 echo
@@ -103,6 +103,12 @@ fi
 if grep -q 'sweetadreno_fwinfo' "$HERE/build/SweetAdreno.cpp"; then
 	runx happy "sweetadreno=1,sweetadreno_fwinfo=1" "firmware 57272 bytes in kernel, 4 segments"
 	runx happy "sweetadreno=1,sweetadreno_fwinfo=1" "fw vector sp=0x10007f80 pc=0x105 plausible"
+fi
+
+# 0190 起 M3 交给内核线程，并在放复位前落盘
+if grep -q 'sweetadreno_delay' "$HERE/build/SweetAdreno.cpp"; then
+	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=3" "deferred work starts now"
+	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "console ring flushed before releasing CM3"
 fi
 
 # 0187 起才有 M3 装载：先在仿真里把五条分支走一遍，再上真机
