@@ -184,6 +184,12 @@ static void install_hooks()
 	}
 	/* smmu：SMMU 活着、全局不旁路、SID 5 走翻译到 bank 3，bank 里 TTBR0 已指向
 	 * 一张表（ASID 1）。用来跑 0189a 的只读探针，判读路径与真机一致。 */
+	if (g_scenario == "smmunone") {
+		Block *m = blk(0x3da0000);
+		m->w[0x20 / 4] = 0x18;
+		m->w[0x24 / 4] = 0x15 | (4u << 28);
+		m->w[0x28 / 4] = 0x2b;
+	}
 	if (g_scenario == "smmu" || g_scenario == "smmubypass") {
 		Block *m = blk(0x3da0000);
 		unsigned pages = 32, bank = 3;
