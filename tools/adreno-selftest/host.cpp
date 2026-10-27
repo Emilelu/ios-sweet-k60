@@ -64,10 +64,13 @@ extern "C" void delay(int us) { g_delay_us += us > 0 ? (unsigned long)us : 0; }
 /* 0190 起驱动会把 M3 的活儿交给内核线程并先睡一会儿；仿真台里同步跑，
  * 睡眠只记账，日志落盘只记一次调用（真机上是把环写进 UFS）。 */
 static unsigned g_flush_calls;
+static bool g_thread_fail;   /* nothread 场景：让 kernel_thread_start 失败 */
 extern "C" void IOSleep(unsigned int ms) { g_delay_us += (unsigned long)ms * 1000UL; }
 extern "C" void sweet_log_flush_now(void) { g_flush_calls++; }
 extern "C" int kernel_thread_start(void (*func)(void *, int), void *arg, void **thread)
 {
+	/* nothread 场景：故意造线程失败，验证驱动会退回同步执行而不是静默不干活 */
+	if (g_thread_fail) return 1;
 	func(arg, 0);
 	if (thread) *thread = (void *)1;
 	return 0;
@@ -170,6 +173,7 @@ static void install_hooks()
 		};
 	}
 	if (g_scenario == "mapfail") g_mapfail = true;
+	if (g_scenario == "nothread") g_thread_fail = true;
 	/* gmulive：GMU 已跑起来（FW_INIT=0x100、HFI up、不在复位）。
 	 * 偏移用 SWEET_GMU_OFF 的算法手算：0x1f800→0x16000 等。 */
 	if (g_scenario == "gmulive") {
@@ -202,7 +206,7 @@ static void install_hooks()
 	/* gmuboot：CM3 被握着复位，写 SYSRESET=0 之后固件才报 FW_INIT=0x100，
 	 * 用来跑通 M3 的完整路径（上传 + 回读 + 配置 + 放复位 + 轮询）。 */
 	if (g_scenario == "gmuboot" || g_scenario == "gmureadback" ||
-	    g_scenario == "gmubooterr") {
+	    g_scenario == "gmubooterr" || g_scenario == "nothread") {
 		Block *m = blk(0x3d68000);
 		m->w[0x16000 / 4] = 1;                 /* CM3_SYSRESET：holding */
 		m->hook = [m](uint32_t off, bool wr, uint32_t val) -> uint32_t {

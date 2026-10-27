@@ -109,6 +109,10 @@ fi
 if grep -q 'sweetadreno_delay' "$HERE/build/SweetAdreno.cpp"; then
 	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=3" "deferred work starts now"
 	runx gmuboot "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=2" "console ring flushed before releasing CM3"
+	if grep -q "cannot start the work thread" "$HERE/build/SweetAdreno.cpp"; then
+		runx nothread "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=3" "cannot start the work thread"
+		runx nothread "sweetadreno=1,sweetadreno_power=1,sweetadreno_gmu=3" "stopped after the CX halt clear"
+	fi
 fi
 
 # 0187 起才有 M3 装载：先在仿真里把五条分支走一遍，再上真机
