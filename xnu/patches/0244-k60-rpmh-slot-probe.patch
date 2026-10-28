@@ -1,0 +1,37 @@
+Subject: [PATCH 0244] k60: probe the RSC command slot read-only and clear the enable bit first
+
+diff --git a/bsd/dev/k60_touch_rpmh.c b/bsd/dev/k60_touch_rpmh.c
+--- a/bsd/dev/k60_touch_rpmh.c
++++ b/bsd/dev/k60_touch_rpmh.c
+@@ -181,6 +181,31 @@
+ 			return -1;
+ 		}
+ 	}
++	/*
++	 * 先做只读体检：槽位的控制位、使能位、状态位原样打出来。写 TCS 之前
++	 * 必须先确认这个槽没在跑（CMD_ENABLE=0 且 STATUS=0），否则硬件总线
++	 * 会直接死锁——我们上一次就是这么挂的。k60rpmhprobe=1 时到此为止。
++	 */
++	{
++		int probe_only = 0;
++
++		printf("K60 TOUCH: tcs ctrl %#x enable %#x status %#x irqen %#x\n",
++		    K60_TOUCH_RD(K60_TCS(K60_TCS_CONTROL)),
++		    K60_TOUCH_RD(K60_TCS(K60_TCS_CMD_ENABLE)),
++		    K60_TOUCH_RD(K60_TCS(K60_TCS_STATUS)),
++		    K60_TOUCH_RD(K60_TCS(K60_TCS_IRQ_ENABLE)));
++		k60_touch_flush();
++		(void)PE_parse_boot_argn("k60rpmhprobe", &probe_only, sizeof(probe_only));
++		if (probe_only != 0) {
++			printf("K60 TOUCH: rpmh read-only probe, no writes\n");
++			k60_touch_flush();
++			return 0;
++		}
++	}
++	/* 关键：写命令之前先把使能位清掉，让硬件认这个槽是空闲的。 */
++	K60_TOUCH_WR(K60_TCS(K60_TCS_CMD_ENABLE), 0);
++	delay(100);
++
+ 	for (i = 0; K60_TOUCH_RD(K60_TCS(K60_TCS_STATUS)) == 0; i++) {
+ 		if (i > 2000) {
+ 			printf("K60 TOUCH: rpmh: the command slots stay busy\n");
