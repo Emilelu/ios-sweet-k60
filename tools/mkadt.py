@@ -117,11 +117,17 @@ def build(seed=None, qemu=False, highmem=False):
         # MobileGestalt reads these from /chosen, and mobileactivationd's
         # DeviceType then takes its native "Hactivation" branch (state
         # Activated without an activation record; no SEP, no baseband here).
-        ('certificate-production-status', u32(0)),
-        ('effective-production-status-ap', u32(0)),
-        ('certificate-security-mode', u32(1)),
-        ('effective-security-mode-sep', u32(1)),
-    ], [node('memory-map', [ph()]),
+		('certificate-production-status', u32(0)),
+		('effective-production-status-ap', u32(0)),
+		('certificate-security-mode', u32(1)),
+		('effective-security-mode-sep', u32(1)),
+		# MobileGestalt 的 WiFi MAC getter 先读 /chosen 的 mac-address-wifi0，
+		# 读不到才去 IORegistry 等 IONetworkController 匹配通知，而那个等待是
+		# dispatch_semaphore_wait(FOREVER)。这台机器没有 WiFi 控制器服务，
+		# 所以 lsd 在算 WifiAddress 时永久卡住，SpringBoard 跟着起不来。
+		# 直接在这里给一份假 MAC（QEMU 默认网卡的厂址段），让它走快路。
+		('mac-address-wifi0', bytes([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])),
+	], [node('memory-map', [ph()]),
         # Local boot policy (kern_csr.c): SIP relaxed like `csrutil disable`
         # (lp-sip0: untrusted kexts, unrestricted FS, task_for_pid, kernel
         # debugger, dtrace, nvram), lp-sip1: unauthenticated (unsealed) root.
