@@ -26,7 +26,9 @@ on:
 
 concurrency:
   group: xnu-${{ github.ref }}
-  cancel-in-progress: true
+  # 不取消正在跑的那条：一次构建七分钟，让它跑完再排下一条。原来 cancel 掉
+  # 之后，那条的产物就没了，对 0235 那种"刚推完又补一刀"的情况尤其坑。
+  cancel-in-progress: false
 
 env:
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
