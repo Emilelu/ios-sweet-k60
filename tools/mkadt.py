@@ -191,8 +191,8 @@ def build(seed=None, qemu=False, highmem=False):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(1440)),
+            ('canvas-height', u32(3200)),
         ])])
 
     fbcon = node('sweet-fbcon', [
