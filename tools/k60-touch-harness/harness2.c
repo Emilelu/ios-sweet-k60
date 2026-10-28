@@ -21,6 +21,7 @@
 
 #include <sys/types.h>
 #include <sys/systm.h>
+#include <sys/k60_touch.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
@@ -179,14 +180,16 @@ chip_respond(const uint8_t *tx, uint32_t length, uint8_t *rx)
 		}
 		return;
 	}
-	if (cmd[0] == 0x81 && length >= 2 + shift) {
+	if ((cmd[0] & 0x80) != 0 && length >= 2 + shift) {
+		/* GT9xx 读：bit15 置一，地址 = 低 15 位。 */
 		addr = ((uint32_t)(cmd[0] & 0x7f) << 8) | cmd[1];
 		for (i = 0; i + 2 + shift < length; i++) {
 			rx[2 + shift + i] = chip_read8(addr + i);
 		}
 		return;
 	}
-	if (cmd[0] == 0x80 && length >= 2 + shift) {
+	if (length >= 2 + shift) {
+		/* GT9xx 写：bit15 清掉。 */
 		addr = ((uint32_t)(cmd[0] & 0x7f) << 8) | cmd[1];
 		for (i = 0; i + 2 + shift < length; i++) {
 			chip_write8(addr + i, cmd[2 + i]);
@@ -447,8 +450,8 @@ k60_touch_test_read(uintptr_t address)
 			return 0x00000102u;
 		case 0x064:
 			return 0;
-		case 0x0e24:	/* HW_PARAM_0：FIFO 深度 16 字 */
-			return 16u << 16;
+		case 0x0e24:	/* HW_PARAM_0：FIFO 深度 64 字 */
+			return 64u << 16;
 		case 0x610:	/* M_IRQ_STATUS */
 			return geni.irq;
 		case 0x780:	/* RX FIFO */
@@ -456,8 +459,14 @@ k60_touch_test_read(uintptr_t address)
 				return geni.rx_words[geni.rx_read++];
 			}
 			return 0;
-		case 0x804:	/* RX FIFO 状态：[24:0] 字数 */
-			return (geni.rx_count - geni.rx_read) & 0x01ffffffu;
+		case 0x804: {	/* RX FIFO 状态：[24:0] 字数，最多一个 FIFO 深 */
+			uint32_t left = geni.rx_count - geni.rx_read;
+
+			if (left > 64u) {
+				left = 64u;
+			}
+			return left & 0x01ffffffu;
+		}
 		case 0x800:	/* TX FIFO 状态：永远有空位 */
 			return 0;
 		case 0x22c:	/* SPI_LOOPBACK 回读 */
@@ -569,7 +578,7 @@ build_berlin_chip(void)
 	uint8_t fw[28];
 	uint8_t info[128];
 	uint32_t off, sum, i;
-	uint16_t len;
+	uint32_t len;
 
 	memset(fw, 0, sizeof(fw));
 	memcpy(fw, "911", 3);
@@ -607,7 +616,7 @@ build_berlin_chip(void)
 	info[off + 54] = 0x00;	/* 0x7d00 = 32000 */
 	info[off + 55] = 0x7d;
 	sum = 0;
-	for (i = 0; i < len - 2; i++) {
+	for (i = 0; i + 2 < len; i++) {
 		sum += info[i];
 	}
 	info[len - 2] = (uint8_t)sum;
@@ -619,13 +628,13 @@ build_berlin_chip(void)
 
 /* 写一份 Berlin 报告：count 个触点，坐标 x/y。 */
 static void
-build_berlin_report(uint32_t count, uint32_t x, uint32_t y)
+build_berlin_report(uint32_t status, uint32_t count, uint32_t x, uint32_t y)
 {
 	uint8_t report[8 + 8 * 10 + 2];
 	uint32_t i, sum;
 
 	memset(report, 0, sizeof(report));
-	report[0] = count ? 0x80 : 0x00;
+	report[0] = (uint8_t)status;
 	report[1] = 0x01;
 	report[2] = (uint8_t)count;
 	sum = 0;
@@ -708,24 +717,26 @@ build_cmd_db(const char *name, uint32_t address, int present)
 	db[5] = 0x30;
 	db[6] = 0x03;
 	db[7] = 0x0c;
-	/* slave[0]: id=4, header_offset=0x100, count=1 */
-	db[12] = 4;
-	db[14] = (uint8_t)header_offset;
-	db[15] = (uint8_t)(header_offset >> 8);
-	db[16] = 0;
-	db[17] = 0;
-	db[18] = 1;
-	db[19] = 0;
-	entry = db + 0x14 + header_offset;	/* data[] 从 0x14 开始 */
+	/*
+	 * struct k60_cmd_db_header：version(4) magic(4) slave[8](16 字节一个)
+	 * checksum(4) reserved(4) -> data[] 从 144 字节开始。
+	 * slave[0] = { id @8, header_offset @10, data_offset @12, count @14 }。
+	 */
+	db[8] = 4;
+	db[10] = (uint8_t)header_offset;
+	db[11] = (uint8_t)(header_offset >> 8);
+	db[14] = 1;
+	entry = db + 144 + header_offset;
 	for (i = 0; i < 8 && name[i]; i++) {
 		entry[i] = (uint8_t)name[i];
 	}
-	entry[12] = (uint8_t)address;
-	entry[13] = (uint8_t)(address >> 8);
-	entry[14] = (uint8_t)(address >> 16);
-	entry[15] = (uint8_t)(address >> 24);
-	entry[16] = 4;
-	entry[17] = 0;
+	/* struct k60_cmd_db_entry：id(8) priority(8) address @16 length @20。 */
+	entry[16] = (uint8_t)address;
+	entry[17] = (uint8_t)(address >> 8);
+	entry[18] = (uint8_t)(address >> 16);
+	entry[19] = (uint8_t)(address >> 24);
+	entry[20] = 4;
+	entry[21] = 0;
 }
 
 static void
@@ -836,31 +847,24 @@ main(int argc, char **argv)
 		build_cmd_db("ldoc2", 0x40004u, 1);
 		fake_clocks(1);
 		geni_never_completes = 1;
-		k60_touch_init();
 		boot_arg("k60touchstage", 4);
 		k60_touch_init();
+		run_thread();
 		CHECK(log_has("stage 3: gcc"), "reached the clock stage");
 		CHECK(log_has("se4 fw 0x102"), "reads the SPI firmware revision");
-		{			/* 单笔传输超时后返回 -1，不挂 */
-			uint8_t tx[4] = { 0x11, 0x22, 0x33, 0x44 };
-
-			CHECK(k60_touch_geni_bringup(4000000u, &(const char *){ 0 }) == 0,
-			    "SPI setup succeeds");
-			CHECK(k60_touch_geni_xfer(tx, NULL, sizeof(tx)) != 0,
-			    "a transfer that never completes returns an error");
-			CHECK(log_has("spi xfer 4 bytes failed"),
-			    "the failure is logged");
-			CHECK(rd32(0x990000u, 0x48u) == ((5u << 4) | 1u),
-			    "SER divider = XO/4 MHz = 5 (%#x)",
-			    rd32(0x990000u, 0x48u));
-		}
+		CHECK(log_has("spi xfer") && log_has("bytes failed"),
+		    "a transfer that never completes fails instead of hanging");
+		CHECK(rd32(0x990000u, 0x48u) == ((5u << 4) | 1u),
+		    "SER divider = XO/4 MHz = 5 (%#x)",
+		    rd32(0x990000u, 0x48u));
+		CHECK(log_has("goodix id failed"), "and the thread stops there");
 	} else if (strcmp(scenario, "berlin") == 0) {
 		const char *problem = NULL;
 
 		build_cmd_db("ldoc2", 0x40004u, 1);
 		fake_clocks(1);
 		build_berlin_chip();
-		build_berlin_report(1, 7200, 16000);
+		build_berlin_report(0x80, 1, 7200, 16000);
 		CHECK(k60_touch_clocks_on() == 0, "clocks on");
 		CHECK(k60_touch_geni_bringup(4000000u, &problem) == 0,
 		    "SPI setup (%s)", problem ? problem : "ok");
@@ -876,7 +880,11 @@ main(int argc, char **argv)
 		    "7200/14400*1440 = 720 px, 16000/32000*3200 = 1600 px (%d,%d)",
 		    hid[0].x, hid[0].y);
 		/* 第二份报告没有触点：应当抬起，坐标沿用上一份。 */
-		build_berlin_report(0, 0, 0);
+		/*
+		 * 没有触点的报告：状态字节非 0（0 = "还没读到东西"，驱动会
+		 * 直接返回），TOUCH 位清掉，于是走抬起路径。
+		 */
+		build_berlin_report(0x01, 0, 0, 0);
 		CHECK(k60_touch_goodix_poll() == 0, "second poll (no touch)");
 		CHECK(nhid == 2 && !hid[1].down, "finger 0 lifted");
 		CHECK(hid[1].x == 720 && hid[1].y == 1600,
