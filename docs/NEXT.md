@@ -1,5 +1,12 @@
 # 回来后从这里继续
 
+> **2026-10-28 锁屏达成**：显示链路通了，K60 能进 iOS 16.7.16 锁屏。
+> 配方与判据见 `docs/LOCKSCREEN-2026-10-28.md`（0218 发布 TimingElements /
+> ColorElements、选择器 77/79、GetID=1、画布按面板 1440×3200）。
+> 现在的阻塞是触摸：读 RSC 第一个地址就整机死，等上游修好再合入；
+> 壁纸不是 GPU 问题，更可能是跳过 Setup 后从未配置过。
+> 下面 10-26 的记录是关于 GPU 那条线的，仍然有效但优先级已降。
+
 > **2026-10-26 18:21 上机结果（0186）：门禁 PASS，M1/M2 全过，卡在 M3**
 > - `SWEET GATE: free=41272 physBase=0xb4000000 memSize=0x4c000000 **memActual=0x2bf00000**
 >   topk=0xb64e8000 dram=0x0 **managed=0x2bf00000** gPhysSize=0x2bf00000` → `gate: PASS`
