@@ -1,0 +1,71 @@
+Subject: [PATCH 0248] k60: read a few RSC addresses to see what the block answers
+
+diff --git a/bsd/sys/k60_touch.h b/bsd/sys/k60_touch.h
+--- a/bsd/sys/k60_touch.h
++++ b/bsd/sys/k60_touch.h
+@@ -182,6 +182,7 @@
+ int k60_touch_pin_output(uint32_t pin, int level, uint32_t pull, uint32_t drive);
+ int k60_touch_pins_power(uint32_t *irq_level);
+ int k60_touch_iovdd_on(void);
++int	k60_touch_rsc_probe(void);
+ 
+ /* 0241 */
+ int k60_touch_clocks_on(void);
+diff --git a/bsd/dev/k60_touch_rpmh.c b/bsd/dev/k60_touch_rpmh.c
+--- a/bsd/dev/k60_touch_rpmh.c
++++ b/bsd/dev/k60_touch_rpmh.c
+@@ -283,3 +283,35 @@
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
++
++/*
++ * RSC 侦察：只读几个地址，读之前先把地址刷到盘。目的是分清"整个 RSC 块
++ * 不可达"还是"只有 TCS 槽不可达"——这两种情况的修法完全不同。
++ */
++int
++k60_touch_rsc_probe(void)
++{
++	static const uint32_t offsets[] = {
++		0x0, 0x1000, 0x10000, 0x20000, 0x20040, 0x20100, 0x20d00, 0x21000
++	};
++
++	if (k60_rsc == 0) {
++		k60_rsc = ml_io_map(K60_TOUCH_RSC_BASE, 0x40000);
++		if (k60_rsc == 0) {
++			printf("K60 TOUCH: rsc probe: map failed\n");
++			return -1;
++		}
++	}
++	for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
++		uint32_t value;
++
++		printf("K60 TOUCH: rsc probe reading %#x\n",
++		    (unsigned)(K60_TOUCH_RSC_BASE + offsets[i]));
++		k60_touch_flush();
++		value = *(volatile uint32_t *)(k60_rsc + offsets[i]);
++		printf("K60 TOUCH: rsc probe %#x = %#x\n",
++		    (unsigned)(K60_TOUCH_RSC_BASE + offsets[i]), value);
++		k60_touch_flush();
++	}
++	return 0;
++}
+diff --git a/bsd/dev/k60_touch.c b/bsd/dev/k60_touch.c
+--- a/bsd/dev/k60_touch.c
++++ b/bsd/dev/k60_touch.c
+@@ -82,6 +82,15 @@
+ 	}
+ 	printf("K60 TOUCH: irq before iovdd %u\n", irq);
+ 	k60_touch_flush();
++	{
++		int rsc_probe = 0;
++
++		(void)PE_parse_boot_argn("k60rscprobe", &rsc_probe, sizeof(rsc_probe));
++		if (rsc_probe != 0) {
++			(void)k60_touch_rsc_probe();
++			k60_touch_done(k60.stage, "k60rscprobe=1, done");
++		}
++	}
+ 	if (k60.stage < K60_TOUCH_STAGE_IOVDD) {
+ 		k60_touch_done(k60.stage, "k60touchstage=2 adds the IOVDD vote");
+ 	}
