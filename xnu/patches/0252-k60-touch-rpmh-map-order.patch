@@ -1,0 +1,44 @@
+Subject: [PATCH 0252] k60: map the RSC block before the first TCS read
+
+RPMh 写路径先读 TCS 再 map：0244 把只读体检和 irq_enable 的读取插到了
+ml_io_map() 之前，于是第一次投票会去读物理地址 0xd00。宿主冒烟台报
+"no access outside the mapped windows"；真机上这是一次未映射访问，正是
+这台机器最怕的那一类，而且它发生在 k60rpmhoff=0 的那条路上。
+
+同时补上 0244 漏掉的 <pexpert/pexpert.h>：它在那里调 PE_parse_boot_argn，
+但只有隐式声明。
+
+diff --git a/bsd/dev/k60_touch_rpmh.c b/bsd/dev/k60_touch_rpmh.c
+index 58e6876..5eaf197 100644
+--- a/bsd/dev/k60_touch_rpmh.c
++++ b/bsd/dev/k60_touch_rpmh.c
+@@ -24,6 +24,7 @@
+ #include <sys/systm.h>
+ #include <sys/k60_touch.h>
+ #include <kern/clock.h>
++#include <pexpert/pexpert.h>
+ #include <machine/machine_routines.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -169,7 +170,7 @@ k60_rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
+ static int
+ k60_rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
+ {
+-	uint32_t irq_enable = K60_TOUCH_RD(K60_TCS(K60_TCS_IRQ_ENABLE));
++	uint32_t irq_enable;
+ 	unsigned i;
+ 	int error;
+ 
+@@ -181,6 +182,12 @@ k60_rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
+ 			return -1;
+ 		}
+ 	}
++	/*
++	 * 0252：这一行必须在 map 之后。0244 把它放在上面，第一次投票就会去
++	 * 读物理地址 0xd00——宿主冒烟台立刻报 unmapped，真机上就是一次
++	 * 未映射访问，正是这台机器最怕的那一类。
++	 */
++	irq_enable = K60_TOUCH_RD(K60_TCS(K60_TCS_IRQ_ENABLE));
+ 	/*
+ 	 * 先做只读体检：槽位的控制位、使能位、状态位原样打出来。写 TCS 之前
+ 	 * 必须先确认这个槽没在跑（CMD_ENABLE=0 且 STATUS=0），否则硬件总线

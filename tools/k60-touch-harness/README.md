@@ -1,23 +1,34 @@
 # k60-touch harness
 
-Host-side smoke test for `bsd/dev/k60_touch_spi.c` (patches 0219-0223). It is
-not part of the xnu build: nothing in `xnu/patches` or the CI workflow refers
-to it.
+Host-side smoke test for the K60 Goodix driver (`bsd/dev/k60_touch*.c`, patches
+0240-0252). It is not part of the xnu build; nothing in `xnu/patches` or the CI
+workflow refers to it.
 
-What it does: takes the source out of the patch chain, drops the three arm64
-barrier instructions (the only thing a host x86 compiler cannot assemble),
-maps every MMIO window to a zeroed memory page, and runs the five stage
-functions against that fake hardware. The fake is plain RAM, so it checks code
-paths, not register semantics:
+`build2.sh` takes the driver straight out of the patch chain (so it compiles the
+same sources that go to the phone), drops the arm64 barrier instruction the host
+compiler cannot assemble, maps every MMIO window to a fake page, and runs the
+driver against:
 
-- the pin programming bit patterns (function, drive, output enable, pull),
-- all five clock bits after the read-modify-write,
-- the firmware/protocol decode and the refusal to continue on a non-SPI SE,
-- the four-byte FIFO packing round trip, the loopback compare, and that a
-  transfer whose DONE bit never arrives still returns instead of hanging,
-- both product-id framings,
-- the boot args: `k60touchoff=1` must not start a thread, the default stage
-  limit must leave GCC and the SE untouched.
+- a fake GENI engine (command, TX/RX FIFO, DONE, length registers, RCG update
+  handshake, and a refusal mode that never completes),
+- fake TLMM pin pages (the bit patterns are checked, not just written),
+- a fake RSC command slot, counting every attempt to map the block,
+- a fake `/k60-touch` ADT node,
+- a fake Goodix chip that answers both the Berlin and the GT9xx framings.
 
-Run it with `bash build.sh` (needs a host `cc` and `patch`). Exit status 0
-means every check passed.
+Scenarios: `default_stage disabled stage0 cmd_db_missing clocks_off clocks_on
+geni_timeout berlin gt9xx no_chip dt_node dt_missing rpmhoff rscprobe_refused
+id_readback`.
+
+Run it with `bash build2.sh` (needs a host `cc`, `git` and `python3`). Exit
+status 0 means every check passed. `HARNESS_ECHO=1 bash build2.sh berlin` also
+prints the captured kernel log.
+
+The checks that matter for the current stage (chip ID readback on hardware):
+
+| Scenario | Asserts |
+|---|---|
+| `rpmhoff` | with `k60rpmhoff=1` the RSC block is never mapped and never triggered, yet the driver still reaches the ID read |
+| `rscprobe_refused` | `k60rpmhoff=1` + `k60rscprobe=1` is refused instead of executing the known-fatal access |
+| `dt_node` / `dt_missing` | the `reg`/gpio/axis values come from `/k60-touch` when it exists, and the compiled defaults are used when it does not |
+| `id_readback` | `k60touchid=1` raises the stage limit to 4, prints `K60 TOUCH: ID: ...` plus the raw bytes, and exits without polling |

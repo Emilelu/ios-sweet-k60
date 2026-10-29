@@ -33,6 +33,16 @@ SWEET_ECID = 0x5357454554000001  # 'SWEET' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2400, 1080 * 4
 # Internal UFS host (ufshc@1d84000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x01d84000, 0x3000
+# Goodix digitizer on QUPv3 SE4. The wiring of record is
+# drivers/k60-goodix-touch/k60-goodix-touch.dtsi; the node below is what the
+# kernel actually sees, and drivers/k60-goodix-touch/check-wiring.py fails when
+# the two disagree. Per-value source: the comments in that file.
+TOUCH_SE, TOUCH_SE_SIZE = 0x00990000, 0x4000
+TOUCH_GCC, TOUCH_GCC_WINDOW = 0x00100000, 0x00070000
+TOUCH_TLMM, TOUCH_TLMM_STRIDE = 0x0f100000, 0x1000
+TOUCH_GPIO_RESET, TOUCH_GPIO_IRQ, TOUCH_GPIO_AVDD = 20, 21, 71
+TOUCH_ABS_X, TOUCH_ABS_Y = 14400, 32000
+TOUCH_SPI_HZ = 15000000
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
@@ -210,6 +220,31 @@ def build(seed=None, qemu=False, highmem=False):
         ('reg', u64(UFS, UFS_SIZE)),
     ])
 
+    # bsd/dev/k60_touch_dt.c: the Goodix digitizer on QUPv3 SE4. reg is three
+    # (base, size/stride) pairs in one property so the driver maps exactly the
+    # windows it needs: SE4, GCC, TLMM. No RSC here on purpose — the block is
+    # unreachable on this unit and k60rpmhoff=1 keeps the driver away from it.
+    touch = node('k60-touch', [
+        ph(),
+        ('compatible', cstr('goodix,gt9916') + cstr('goodix,goodix-touchscreen')),
+        ('reg', u64(TOUCH_SE, TOUCH_SE_SIZE, TOUCH_GCC, TOUCH_GCC_WINDOW,
+                    TOUCH_TLMM, TOUCH_TLMM_STRIDE)),
+        # GIC SPI 605 (live FDT spi@990000 interrupts = <0 0x25d 4>). Informational:
+        # the driver polls and leaves M_IRQ_EN at 0, nothing claims the line.
+        ('interrupts', u32(0, 605, 4)),
+        ('goodix,reset-gpio', u32(TOUCH_GPIO_RESET)),
+        ('goodix,irq-gpio', u32(TOUCH_GPIO_IRQ)),
+        ('goodix,avdd-gpio', u32(TOUCH_GPIO_AVDD)),
+        ('goodix,panel-max-x', u32(TOUCH_ABS_X)),
+        ('goodix,panel-max-y', u32(TOUCH_ABS_Y)),
+        ('goodix,panel-max-w', u32(255)),
+        ('goodix,panel-max-p', u32(4096)),
+        ('spi-max-frequency', u32(TOUCH_SPI_HZ)),
+        ('goodix,firmware-name', cstr('goodix_firmware_m11a')),
+        ('goodix,config-name', cstr('goodix_cfg_group_m11a')),
+        ('goodix,iovdd-name', cstr('ldoc2')),
+    ])
+
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
     # No effaceable storage: keybagd then reads /private/var/keybags/systembag.kb
@@ -244,7 +279,7 @@ def build(seed=None, qemu=False, highmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([] if qemu else [ufs, touch]))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,182 @@
+Subject: [PATCH 0251] k60: add k60touchid=1 and a machine-readable ID readback line
+
+判据缺一行机器可 grep 的结论。这个补丁加 k60touchid=1：把分级抬到 4（只
+验到 ID），探测成功后打一行摘要再退出，不进轮询、不写任何状态。
+
+  K60 TOUCH: ID: abi=berlin chip="911" firmware="..." version=.. sensor=..
+              report=0x.... command=0x.... axes=14400x32000
+  K60 TOUCH: ID: raw 0x10014 = 39 31 31 00 00 00 00 00
+  K60 TOUCH: ID: abi=gt9xx product="9111" axes=14400x32000
+  K60 TOUCH: ID: raw 0x8140 = 39 31 31 31
+
+顺带把硬约束写进代码：k60rpmhoff=1 时拒绝 k60rscprobe=1。以前两个参数
+撞在一起就会去读 0x17a00000——那一次读是这台机器已知的整机死法。
+
+diff --git a/bsd/dev/k60_touch.c b/bsd/dev/k60_touch.c
+index 7cbb2ed..31c0400 100644
+--- a/bsd/dev/k60_touch.c
++++ b/bsd/dev/k60_touch.c
+@@ -42,6 +42,7 @@ static struct {
+ 	int stage;
+ 	int delay_s;
+ 	int hz;
++	int id_only;	/* k60touchid=1：读到 ID 就打摘要退出，不进轮询 */
+ } k60;
+ 
+ static void
+@@ -84,10 +85,23 @@ k60_touch_thread(void *arg, wait_result_t result)
+ 	k60_touch_flush();
+ 	{
+ 		int rsc_probe = 0;
++		int rpmh_off = 0;
+ 
+ 		(void)PE_parse_boot_argn("k60rscprobe", &rsc_probe, sizeof(rsc_probe));
++		(void)PE_parse_boot_argn("k60rpmhoff", &rpmh_off, sizeof(rpmh_off));
+ 		if (rsc_probe != 0) {
+-			(void)k60_touch_rsc_probe();
++			/*
++			 * 0251：k60rpmhoff=1 的整条链路必须与 RSC 零接触。
++			 * 两个参数撞在一起时拒绝探测——那一次读就是这台机器
++			 * 已知的整机死法，不能靠参数顺序来赌。
++			 */
++			if (rpmh_off != 0) {
++				printf("K60 TOUCH: rsc probe refused: k60rpmhoff=1, "
++				    "that access kills this unit\n");
++				k60_touch_flush();
++			} else {
++				(void)k60_touch_rsc_probe();
++			}
+ 			k60_touch_done(k60.stage, "k60rscprobe=1, done");
+ 		}
+ 	}
+@@ -140,6 +154,14 @@ k60_touch_thread(void *arg, wait_result_t result)
+ 	printf("K60 TOUCH: stage 4: goodix id ok, abi %d\n",
+ 	    k60_touch_goodix_abi());
+ 	k60_touch_flush();
++	/*
++	 * 0251：ID 摘要。k60touchid=1 的整条验证就到这里为止——不写状态、
++	 * 不进轮询，日志里只多两行，其中 "K60 TOUCH: ID:" 那行是判据。
++	 */
++	k60_touch_goodix_id_summary();
++	if (k60.id_only != 0) {
++		k60_touch_done(k60.stage, "k60touchid=1, ID readback only");
++	}
+ 	if (k60.stage < K60_TOUCH_STAGE_REPORT) {
+ 		k60_touch_done(k60.stage, "k60touchstage=5 adds the poll loop");
+ 	}
+@@ -184,11 +206,20 @@ k60_touch_init(void)
+ 	(void)PE_parse_boot_argn("k60touchdelay", &k60.delay_s,
+ 	    sizeof(k60.delay_s));
+ 	(void)PE_parse_boot_argn("k60touchhz", &k60.hz, sizeof(k60.hz));
++	(void)PE_parse_boot_argn("k60touchid", &k60.id_only,
++	    sizeof(k60.id_only));
+ 	if (PE_parse_boot_argn("k60touchflush", &flush, sizeof(flush))) {
+ 		k60_touch_flush_on = flush;
+ 	}
+ 	/* 0250：接线。节点缺席时这里只是打一行并保留编译期缺省。 */
+ 	(void)k60_touch_wiring_load();
++	/*
++	 * 0251：k60touchid=1 的意思是"只验到 ID"，所以它至少要把分级抬到
++	 * GENI；比 4 更高的分级（比如 5）也照旧尊重，不会把它降下来。
++	 */
++	if (k60.id_only != 0 && k60.stage < K60_TOUCH_STAGE_GENI) {
++		k60.stage = K60_TOUCH_STAGE_GENI;
++	}
+ 	/* 越界的分级不猜：夹到 0..5，0 = 什么都不做。 */
+ 	if (k60.stage < K60_TOUCH_STAGE_OFF) {
+ 		k60.stage = K60_TOUCH_STAGE_OFF;
+@@ -207,8 +238,8 @@ k60_touch_init(void)
+ 		k60.hz = (int)k60_touch_hw.spi_hz;
+ 	}
+ 	printf("K60 TOUCH: init: stage %d (1 pins, 2 +iovdd, 3 +clocks, "
+-	    "4 +spi/id, 5 +poll), delay %d s, spi %d Hz, flush %d\n",
+-	    k60.stage, k60.delay_s, k60.hz, k60_touch_flush_on);
++	    "4 +spi/id, 5 +poll), delay %d s, spi %d Hz, flush %d, id only %d\n",
++	    k60.stage, k60.delay_s, k60.hz, k60_touch_flush_on, k60.id_only);
+ 	if (k60.stage == K60_TOUCH_STAGE_OFF) {
+ 		printf("K60 TOUCH: stage 0, nothing to do\n");
+ 		return;
+diff --git a/bsd/dev/k60_touch_goodix.c b/bsd/dev/k60_touch_goodix.c
+index 8f9b8d9..1f8a156 100644
+--- a/bsd/dev/k60_touch_goodix.c
++++ b/bsd/dev/k60_touch_goodix.c
+@@ -62,6 +62,12 @@ static int k60_gt9xx_prefix;
+ static int k60_flip;
+ static unsigned k60_shown;
+ 
++/* 0251：探针读到的原始字节，留给 id 摘要再打一次（机器可 grep 的一行）。 */
++static uint8_t k60_berlin_version[28];
++static uint32_t k60_berlin_version_len;
++static uint8_t k60_gt9xx_id[4];
++static uint32_t k60_gt9xx_id_len;
++
+ static uint8_t k60_tx[8 + K60_GOODIX_MAX_READ];
+ static uint8_t k60_rx[8 + K60_GOODIX_MAX_READ];
+ 
+@@ -239,6 +245,8 @@ k60_berlin_probe(int verbose)
+ 	    "%02x.%02x.%02x.%02x sensor %u\n", (const char *)version,
+ 	    (const char *)version + 10, version[18], version[19], version[20],
+ 	    version[21], version[23]);
++	memcpy(k60_berlin_version, version, sizeof(version));
++	k60_berlin_version_len = (uint32_t)sizeof(version);
+ 
+ 	if (k60_berlin_read(K60_BERLIN_IC_INFO, info, 2) != 0) {
+ 		return -1;
+@@ -312,6 +320,8 @@ k60_gt9xx_probe(int verbose)
+ 		if (k60_printable(id, sizeof(id))) {
+ 			printf("K60 TOUCH: id: gt9xx text %c%c%c%c\n", id[0],
+ 			    id[1], id[2], id[3]);
++			memcpy(k60_gt9xx_id, id, sizeof(id));
++			k60_gt9xx_id_len = (uint32_t)sizeof(id);
+ 			ok = 0;
+ 			break;
+ 		}
+@@ -366,6 +376,48 @@ k60_touch_goodix_abi(void)
+ 	return k60_abi;
+ }
+ 
++/*
++ * 0251：ID 读回的一行摘要。前半段是给人看的，后半段（raw）是给脚本比对
++ * 的——和驱动其它日志一样以 "K60 TOUCH: ID:" 开头，grep 一条就够。
++ */
++void
++k60_touch_goodix_id_summary(void)
++{
++	uint32_t i;
++
++	switch (k60_abi) {
++	case K60_ABI_BERLIN:
++		printf("K60 TOUCH: ID: abi=berlin chip=\"%.6s\" "
++		    "firmware=\"%.8s\" version=%02x.%02x.%02x.%02x sensor=%u "
++		    "report=%#x command=%#x axes=%ux%u\n",
++		    (const char *)k60_berlin_version,
++		    (const char *)k60_berlin_version + 10,
++		    k60_berlin_version[18], k60_berlin_version[19],
++		    k60_berlin_version[20], k60_berlin_version[21],
++		    k60_berlin_version[23], k60_berlin_touch, k60_berlin_cmd,
++		    k60_abs_x, k60_abs_y);
++		printf("K60 TOUCH: ID: raw 0x10014 =");
++		for (i = 0; i < k60_berlin_version_len && i < 8; i++) {
++			printf(" %02x", k60_berlin_version[i]);
++		}
++		printf("\n");
++		break;
++	case K60_ABI_GT9XX:
++		printf("K60 TOUCH: ID: abi=gt9xx product=\"%.4s\" axes=%ux%u\n",
++		    (const char *)k60_gt9xx_id, k60_abs_x, k60_abs_y);
++		printf("K60 TOUCH: ID: raw 0x8140 =");
++		for (i = 0; i < k60_gt9xx_id_len && i < 4; i++) {
++			printf(" %02x", k60_gt9xx_id[i]);
++		}
++		printf("\n");
++		break;
++	default:
++		printf("K60 TOUCH: ID: abi=none, nothing answered\n");
++		break;
++	}
++	k60_touch_flush();
++}
++
+ /* ---- 触点 -> SweetHIDTouch ------------------------------------------------ */
+ 
+ static int

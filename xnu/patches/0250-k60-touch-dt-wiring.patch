@@ -1,0 +1,469 @@
+Subject: [PATCH 0250] k60: take the touch wiring from /k60-touch, with the macros as fallback
+
+0240-0243 把三个窗口、三根控制线和坐标上限写死在 bsd/sys/k60_touch.h。
+这个补丁加一个 k60_touch_dt.c：先读 ADT 的 /k60-touch（tools/mkadt.py 发
+的节点，板级事实见 drivers/k60-goodix-touch/），读到就用它，读不到就保留
+编译期缺省——节点缺席时行为与 0248 完全一样，所以它可以单独回退。
+
+pins.c / geni.c / goodix.c 改成读 k60_touch_hw 里的值，k60_touch.c 在起
+线程之前调用一次 k60_touch_wiring_load()。DT 的 spi-max-frequency 只当
+上限：k60touchhz 超过它时夹住，不会因为 DT 写了 15 MHz 就把 4 MHz 的
+起步频率改掉。
+
+判据：
+  K60 TOUCH: dt: se ... gcc ... tlmm ... gpio ...      （节点在）
+  K60 TOUCH: dt: no /k60-touch node, compiled wiring   （节点不在）
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 93bbada..fb4a8ef 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -117,6 +117,7 @@ bsd/dev/k60_touch_rpmh.c		standard
+ bsd/dev/k60_touch_geni.c		standard
+ bsd/dev/k60_touch_goodix.c		standard
+ bsd/dev/k60_touch.c			standard
++bsd/dev/k60_touch_dt.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/k60_touch.c b/bsd/dev/k60_touch.c
+index 3fbbf17..7cbb2ed 100644
+--- a/bsd/dev/k60_touch.c
++++ b/bsd/dev/k60_touch.c
+@@ -105,14 +105,15 @@ k60_touch_thread(void *arg, wait_result_t result)
+ 
+ 		(void)PE_parse_boot_argn("k60rpmhoff", &rpmh_off, sizeof(rpmh_off));
+ 		if (rpmh_off != 0) {
+-			printf("K60 TOUCH: iovdd vote skipped (k60rpmhoff=1)\n");
++			printf("K60 TOUCH: iovdd vote skipped (k60rpmhoff=1), "
++			    "RSC not mapped\n");
+ 			k60_touch_flush();
+ 		} else if (k60_touch_iovdd_on() != 0) {
+ 			k60_touch_stop("iovdd");
+ 		}
+ 	}
+ 	k60_touch_sleep_ms(5);
+-	(void)k60_touch_pin_level(K60_TOUCH_GPIO_IRQ, &after);
++	(void)k60_touch_pin_level(k60_touch_hw.gpio_irq, &after);
+ 	printf("K60 TOUCH: irq after iovdd %u (1 = the chip holds the line)\n",
+ 	    after);
+ 	k60_touch_flush();
+@@ -143,12 +144,12 @@ k60_touch_thread(void *arg, wait_result_t result)
+ 		k60_touch_done(k60.stage, "k60touchstage=5 adds the poll loop");
+ 	}
+ 
+-	(void)k60_touch_pin_level(K60_TOUCH_GPIO_IRQ, &after);
++	(void)k60_touch_pin_level(k60_touch_hw.gpio_irq, &after);
+ 	printf("K60 TOUCH: polling, irq %u, abi %d, every %u ms\n", after,
+ 	    k60_touch_goodix_abi(), K60_TOUCH_POLL_MS);
+ 	k60_touch_flush();
+ 	for (;;) {
+-		if (k60_touch_pin_level(K60_TOUCH_GPIO_IRQ, &after) != 0 ||
++		if (k60_touch_pin_level(k60_touch_hw.gpio_irq, &after) != 0 ||
+ 		    after == 0 || ++idle >= K60_TOUCH_IDLE_POLLS) {
+ 			idle = 0;
+ 			(void)k60_touch_goodix_poll();
+@@ -186,6 +187,8 @@ k60_touch_init(void)
+ 	if (PE_parse_boot_argn("k60touchflush", &flush, sizeof(flush))) {
+ 		k60_touch_flush_on = flush;
+ 	}
++	/* 0250：接线。节点缺席时这里只是打一行并保留编译期缺省。 */
++	(void)k60_touch_wiring_load();
+ 	/* 越界的分级不猜：夹到 0..5，0 = 什么都不做。 */
+ 	if (k60.stage < K60_TOUCH_STAGE_OFF) {
+ 		k60.stage = K60_TOUCH_STAGE_OFF;
+@@ -199,6 +202,10 @@ k60_touch_init(void)
+ 	if (k60.hz < K60_TOUCH_SPI_MIN_HZ) {
+ 		k60.hz = K60_TOUCH_SPI_MIN_HZ;
+ 	}
++	/* DT 的 spi-max-frequency 是上限，boot-arg 只能在它下面调。 */
++	if (k60_touch_hw.spi_hz != 0 && k60.hz > (int)k60_touch_hw.spi_hz) {
++		k60.hz = (int)k60_touch_hw.spi_hz;
++	}
+ 	printf("K60 TOUCH: init: stage %d (1 pins, 2 +iovdd, 3 +clocks, "
+ 	    "4 +spi/id, 5 +poll), delay %d s, spi %d Hz, flush %d\n",
+ 	    k60.stage, k60.delay_s, k60.hz, k60_touch_flush_on);
+diff --git a/bsd/dev/k60_touch_dt.c b/bsd/dev/k60_touch_dt.c
+new file mode 100755
+index 0000000..77a3dd9
+--- /dev/null
++++ b/bsd/dev/k60_touch_dt.c
+@@ -0,0 +1,138 @@
++/*
++ * K60（mondrian，SM8475）触摸：从 ADT 的 /k60-touch 节点取接线（0250）。
++ *
++ * 0240-0243 把三个窗口、三根控制线、坐标上限全写死在 bsd/sys/k60_touch.h。
++ * 这对第一轮上机是对的（少一层解析就少一个失败点），但板级事实现在有两个
++ * 副本：驱动的宏，和 tools/mkadt.py 里那张表。这个文件把驱动那一侧改成
++ * "节点优先、宏兜底"：
++ *
++ *   /k60-touch 有     -> 用它，并打一行 "K60 TOUCH: dt: ..." 记录实际值
++ *   /k60-touch 没有   -> 用宏，打 "dt: no /k60-touch node"，行为与 0248 相同
++ *
++ * 节点只描述这一颗触摸控制器需要的东西：SE4 / GCC / TLMM 三个窗口（一个
++ * reg 里三对 base/size），reset / irq / avdd 三个 GPIO，坐标上限，SPI 上限。
++ * 故意不写 RSC：那块在这台机器上不可达（0248），驱动走 k60rpmhoff=1 时
++ * 连映射都不做。
++ *
++ * 判据行：
++ *   "K60 TOUCH: dt: se ... gcc ... tlmm ... gpio reset .. irq .. avdd .."
++ *   "K60 TOUCH: dt: no /k60-touch node, compiled wiring (...)"
++ *   "K60 TOUCH: dt: /k60-touch has no usable reg, keeping compiled windows"
++ */
++#include <pexpert/arm64/board_config.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/k60_touch.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++
++/*
++ * 编译期缺省。逐项与 0240-0243 里写死的值相同，所以节点缺席时行为不变。
++ * .from_dt = 0 是"这些不是从节点读来的"的标记，日志里会打出来。
++ */
++struct k60_touch_wiring k60_touch_hw = {
++	.se_base = K60_TOUCH_SE_BASE,
++	.se_window = K60_TOUCH_SE_WINDOW,
++	.gcc_base = K60_TOUCH_GCC_BASE,
++	.gcc_window = K60_TOUCH_GCC_WINDOW,
++	.tlmm_base = K60_TOUCH_TLMM_BASE,
++	.tlmm_stride = K60_TOUCH_TLMM_STRIDE,
++	.gpio_clk = K60_TOUCH_GPIO_CLK,
++	.gpio_mosi = K60_TOUCH_GPIO_MOSI,
++	.gpio_miso = K60_TOUCH_GPIO_MISO,
++	.gpio_cs = K60_TOUCH_GPIO_CS,
++	.gpio_reset = K60_TOUCH_GPIO_RESET,
++	.gpio_irq = K60_TOUCH_GPIO_IRQ,
++	.gpio_avdd = K60_TOUCH_GPIO_AVDD,
++	.panel_max_x = K60_TOUCH_ABS_MAX_X,
++	.panel_max_y = K60_TOUCH_ABS_MAX_Y,
++	.spi_hz = K60_TOUCH_SPI_HZ,
++	.irq = 605,
++	.from_dt = 0,
++};
++
++/* ADT 的属性是 4 字节小端；x86 和 arm64 都是小端，直接拷。 */
++static int
++k60_dt_u32(DTEntry node, const char *name, uint32_t *out)
++{
++	void const *value = NULL;
++	unsigned int size = 0;
++
++	if (SecureDTGetProperty(node, name, &value, &size) != kSuccess ||
++	    value == NULL || size < sizeof(uint32_t)) {
++		return -1;
++	}
++	memcpy(out, value, sizeof(*out));
++	return 0;
++}
++
++int
++k60_touch_wiring_load(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	uint32_t value;
++
++	if (SecureDTLookupEntry(NULL, "/k60-touch", &node) != kSuccess) {
++		printf("K60 TOUCH: dt: no /k60-touch node, compiled wiring "
++		    "(se %#lx gcc %#lx tlmm %#lx, gpio %u/%u/%u)\n",
++		    (unsigned long)k60_touch_hw.se_base,
++		    (unsigned long)k60_touch_hw.gcc_base,
++		    (unsigned long)k60_touch_hw.tlmm_base,
++		    k60_touch_hw.gpio_reset, k60_touch_hw.gpio_irq,
++		    k60_touch_hw.gpio_avdd);
++		k60_touch_flush();
++		return -1;
++	}
++
++	/* reg = <se base, se size, gcc base, gcc window, tlmm base, stride> */
++	if (SecureDTGetProperty(node, "reg", (void const **)&reg, &size) ==
++	    kSuccess && reg != NULL && size >= 6 * sizeof(uintptr_t)) {
++		k60_touch_hw.se_base = reg[0];
++		k60_touch_hw.se_window = (uint32_t)reg[1];
++		k60_touch_hw.gcc_base = reg[2];
++		k60_touch_hw.gcc_window = (uint32_t)reg[3];
++		k60_touch_hw.tlmm_base = reg[4];
++		k60_touch_hw.tlmm_stride = (uint32_t)reg[5];
++	} else {
++		printf("K60 TOUCH: dt: /k60-touch has no usable reg, keeping "
++		    "compiled windows\n");
++		k60_touch_flush();
++	}
++
++	if (k60_dt_u32(node, "goodix,reset-gpio", &value) == 0) {
++		k60_touch_hw.gpio_reset = value;
++	}
++	if (k60_dt_u32(node, "goodix,irq-gpio", &value) == 0) {
++		k60_touch_hw.gpio_irq = value;
++	}
++	if (k60_dt_u32(node, "goodix,avdd-gpio", &value) == 0) {
++		k60_touch_hw.gpio_avdd = value;
++	}
++	if (k60_dt_u32(node, "goodix,panel-max-x", &value) == 0 && value != 0) {
++		k60_touch_hw.panel_max_x = value;
++	}
++	if (k60_dt_u32(node, "goodix,panel-max-y", &value) == 0 && value != 0) {
++		k60_touch_hw.panel_max_y = value;
++	}
++	if (k60_dt_u32(node, "spi-max-frequency", &value) == 0 && value != 0) {
++		k60_touch_hw.spi_hz = value;
++	}
++	k60_touch_hw.from_dt = 1;
++
++	printf("K60 TOUCH: dt: se %#lx+%#x gcc %#lx+%#x tlmm %#lx/%#x "
++	    "gpio reset %u irq %u avdd %u spi %u Hz axes %u x %u\n",
++	    (unsigned long)k60_touch_hw.se_base, k60_touch_hw.se_window,
++	    (unsigned long)k60_touch_hw.gcc_base, k60_touch_hw.gcc_window,
++	    (unsigned long)k60_touch_hw.tlmm_base, k60_touch_hw.tlmm_stride,
++	    k60_touch_hw.gpio_reset, k60_touch_hw.gpio_irq,
++	    k60_touch_hw.gpio_avdd, k60_touch_hw.spi_hz,
++	    k60_touch_hw.panel_max_x, k60_touch_hw.panel_max_y);
++	k60_touch_flush();
++	return 0;
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/k60_touch_geni.c b/bsd/dev/k60_touch_geni.c
+index 08d06d2..a898137 100644
+--- a/bsd/dev/k60_touch_geni.c
++++ b/bsd/dev/k60_touch_geni.c
+@@ -158,11 +158,12 @@ k60_touch_clocks_on(void)
+ 	unsigned i, missed = 0;
+ 
+ 	printf("K60 TOUCH: stage 3: gcc %#lx window %#lx, no SE access yet\n",
+-	    (unsigned long)K60_TOUCH_GCC_BASE,
+-	    (unsigned long)K60_TOUCH_GCC_WINDOW);
++	    (unsigned long)k60_touch_hw.gcc_base,
++	    (unsigned long)k60_touch_hw.gcc_window);
+ 	k60_touch_flush();
+ 	if (k60_gcc == 0) {
+-		k60_gcc = ml_io_map(K60_TOUCH_GCC_BASE, K60_TOUCH_GCC_WINDOW);
++		k60_gcc = ml_io_map(k60_touch_hw.gcc_base,
++		    k60_touch_hw.gcc_window);
+ 		if (k60_gcc == 0) {
+ 			printf("K60 TOUCH: gcc map failed\n");
+ 			return -1;
+@@ -393,19 +394,21 @@ k60_touch_geni_xfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
+ int
+ k60_touch_geni_bringup(uint32_t hz, const char **problem)
+ {
+-	static const uint32_t spi_pins[4] = {
+-		K60_TOUCH_GPIO_CLK, K60_TOUCH_GPIO_MOSI,
+-		K60_TOUCH_GPIO_MISO, K60_TOUCH_GPIO_CS,
+-	};
++	uint32_t spi_pins[4];
+ 	uint32_t fw, depth, divider, mclk;
+ 	unsigned i;
+ 
+ 	*problem = "unknown";
++	spi_pins[0] = k60_touch_hw.gpio_clk;
++	spi_pins[1] = k60_touch_hw.gpio_mosi;
++	spi_pins[2] = k60_touch_hw.gpio_miso;
++	spi_pins[3] = k60_touch_hw.gpio_cs;
+ 	printf("K60 TOUCH: stage 4: se4 %#lx, spi up to %u Hz\n",
+-	    (unsigned long)K60_TOUCH_SE_BASE, hz);
++	    (unsigned long)k60_touch_hw.se_base, hz);
+ 	k60_touch_flush();
+ 	if (k60_se == 0) {
+-		k60_se = ml_io_map(K60_TOUCH_SE_BASE, K60_TOUCH_SE_WINDOW);
++		k60_se = ml_io_map(k60_touch_hw.se_base,
++		    k60_touch_hw.se_window);
+ 		if (k60_se == 0) {
+ 			*problem = "cannot map se4";
+ 			return -1;
+@@ -487,14 +490,14 @@ k60_touch_geni_bringup(uint32_t hz, const char **problem)
+ 	/* 四根线交给 QUP；CS 上拉，MISO/MOSI/CLK 不拉。 */
+ 	for (i = 0; i < 4; i++) {
+ 		if (k60_touch_pin_config(spi_pins[i], K60_TOUCH_PIN_FUNC_QUP,
+-		    spi_pins[i] == K60_TOUCH_GPIO_CS ? K60_TOUCH_PIN_PULL_UP :
++		    spi_pins[i] == k60_touch_hw.gpio_cs ? K60_TOUCH_PIN_PULL_UP :
+ 		    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA, 0) != 0) {
+ 			*problem = "spi pins do not take the QUP function";
+ 			return -1;
+ 		}
+ 	}
+-	printf("K60 TOUCH: se4 pins gpio%u-%u -> qup\n", K60_TOUCH_GPIO_CLK,
+-	    K60_TOUCH_GPIO_CS);
++	printf("K60 TOUCH: se4 pins gpio%u-%u -> qup\n",
++	    k60_touch_hw.gpio_clk, k60_touch_hw.gpio_cs);
+ 	printf("K60 TOUCH: se4 spi cfg word %#x mclk %#x (source %u Hz / %u)\n",
+ 	    K60_TOUCH_RD(k60_se + K60_SE_SPI_WORD_LEN), mclk,
+ 	    k60_se_source_hz, divider);
+diff --git a/bsd/dev/k60_touch_goodix.c b/bsd/dev/k60_touch_goodix.c
+index b982610..8f9b8d9 100644
+--- a/bsd/dev/k60_touch_goodix.c
++++ b/bsd/dev/k60_touch_goodix.c
+@@ -204,10 +204,10 @@ k60_gt9xx_write(uint32_t address, const uint8_t *data, uint32_t length)
+ static void
+ k60_touch_reset(void)
+ {
+-	(void)k60_touch_pin_output(K60_TOUCH_GPIO_RESET, 0,
++	(void)k60_touch_pin_output(k60_touch_hw.gpio_reset, 0,
+ 	    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA);
+ 	delay(2 * 1000);
+-	(void)k60_touch_pin_output(K60_TOUCH_GPIO_RESET, 1,
++	(void)k60_touch_pin_output(k60_touch_hw.gpio_reset, 1,
+ 	    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA);
+ 	delay(100 * 1000);
+ }
+@@ -331,6 +331,17 @@ k60_touch_goodix_probe(int verbose)
+ {
+ 	(void)PE_parse_boot_argn("k60touchflip", &k60_flip, sizeof(k60_flip));
+ 
++	/*
++	 * 0250：坐标上限的缺省值来自接线（/k60-touch 节点优先，宏兜底）。
++	 * IC info 自报的值仍然优先，探测到就会覆盖这两个。
++	 */
++	if (k60_touch_hw.panel_max_x != 0) {
++		k60_abs_x = k60_touch_hw.panel_max_x;
++	}
++	if (k60_touch_hw.panel_max_y != 0) {
++		k60_abs_y = k60_touch_hw.panel_max_y;
++	}
++
+ 	/* 先试 Berlin（pong 同一代的芯片），再试老的 GT9xx。 */
+ 	if (k60_berlin_probe(verbose) == 0) {
+ 		k60_abi = K60_ABI_BERLIN;
+diff --git a/bsd/dev/k60_touch_pins.c b/bsd/dev/k60_touch_pins.c
+index 67cb0cb..57beda9 100644
+--- a/bsd/dev/k60_touch_pins.c
++++ b/bsd/dev/k60_touch_pins.c
+@@ -81,10 +81,11 @@ k60_pin_page(uint32_t pin)
+ 	}
+ 	/* 映射之前先落一行：地址写错时互连会卡死，盘上最后一行就是凶手。 */
+ 	printf("K60 TOUCH: map gpio%u at 0x%lx\n", pin,
+-	    (unsigned long)(K60_TOUCH_TLMM_BASE + K60_TOUCH_TLMM_STRIDE * pin));
++	    (unsigned long)(k60_touch_hw.tlmm_base +
++	    k60_touch_hw.tlmm_stride * pin));
+ 	k60_touch_flush();
+-	page = ml_io_map(K60_TOUCH_TLMM_BASE + K60_TOUCH_TLMM_STRIDE * pin,
+-	    K60_TOUCH_TLMM_STRIDE);
++	page = ml_io_map(k60_touch_hw.tlmm_base +
++	    k60_touch_hw.tlmm_stride * pin, k60_touch_hw.tlmm_stride);
+ 	if (page == 0) {
+ 		printf("K60 TOUCH: map gpio%u failed\n", pin);
+ 		return 0;
+@@ -157,15 +158,19 @@ k60_touch_pins_power(uint32_t *irq_level)
+ 	uint32_t level = 0;
+ 
+ 	printf("K60 TOUCH: stage 1: avdd gpio%u, reset gpio%u, irq gpio%u\n",
+-	    K60_TOUCH_GPIO_AVDD, K60_TOUCH_GPIO_RESET, K60_TOUCH_GPIO_IRQ);
++	    k60_touch_hw.gpio_avdd, k60_touch_hw.gpio_reset,
++	    k60_touch_hw.gpio_irq);
+ 	k60_touch_flush();
+ 
+ 	/* 先看引导装载程序留下的样子：功能 0、输入，不驱动任何一根线。 */
+-	if (k60_touch_pin_config(K60_TOUCH_GPIO_AVDD, K60_TOUCH_PIN_FUNC_GPIO,
++	if (k60_touch_pin_config(k60_touch_hw.gpio_avdd,
++	    K60_TOUCH_PIN_FUNC_GPIO,
+ 	    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_2MA, 0) != 0 ||
+-	    k60_touch_pin_config(K60_TOUCH_GPIO_RESET, K60_TOUCH_PIN_FUNC_GPIO,
++	    k60_touch_pin_config(k60_touch_hw.gpio_reset,
++	    K60_TOUCH_PIN_FUNC_GPIO,
+ 	    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA, 0) != 0 ||
+-	    k60_touch_pin_config(K60_TOUCH_GPIO_IRQ, K60_TOUCH_PIN_FUNC_GPIO,
++	    k60_touch_pin_config(k60_touch_hw.gpio_irq,
++	    K60_TOUCH_PIN_FUNC_GPIO,
+ 	    K60_TOUCH_PIN_PULL_UP, K60_TOUCH_PIN_DRIVE_2MA, 0) != 0) {
+ 		printf("K60 TOUCH: pins unavailable, stopping\n");
+ 		k60_touch_flush();
+@@ -173,10 +178,10 @@ k60_touch_pins_power(uint32_t *irq_level)
+ 	}
+ 
+ 	/* AVDD 开、复位按住。 */
+-	if (k60_touch_pin_output(K60_TOUCH_GPIO_AVDD, 1, K60_TOUCH_PIN_PULL_NONE,
+-	    K60_TOUCH_PIN_DRIVE_2MA) != 0 ||
+-	    k60_touch_pin_output(K60_TOUCH_GPIO_RESET, 0, K60_TOUCH_PIN_PULL_NONE,
+-	    K60_TOUCH_PIN_DRIVE_8MA) != 0) {
++	if (k60_touch_pin_output(k60_touch_hw.gpio_avdd, 1,
++	    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_2MA) != 0 ||
++	    k60_touch_pin_output(k60_touch_hw.gpio_reset, 0,
++	    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA) != 0) {
+ 		printf("K60 TOUCH: avdd/reset drive failed, stopping\n");
+ 		k60_touch_flush();
+ 		return -1;
+@@ -187,12 +192,12 @@ k60_touch_pins_power(uint32_t *irq_level)
+ 	delay(K60_TOUCH_RESET_LOW_MS * 1000);
+ 
+ 	/* 复位沿之前的 INT 电平决定芯片进哪种模式，先记下来。 */
+-	(void)k60_touch_pin_level(K60_TOUCH_GPIO_IRQ, &level);
++	(void)k60_touch_pin_level(k60_touch_hw.gpio_irq, &level);
+ 	printf("K60 TOUCH: irq before reset release %u\n", level);
+ 	k60_touch_flush();
+ 
+ 	/* 放开复位，等芯片起振。 */
+-	(void)k60_touch_pin_output(K60_TOUCH_GPIO_RESET, 1,
++	(void)k60_touch_pin_output(k60_touch_hw.gpio_reset, 1,
+ 	    K60_TOUCH_PIN_PULL_NONE,
+ 	    K60_TOUCH_PIN_DRIVE_8MA);
+ 	printf("K60 TOUCH: reset released, settling %u ms\n",
+@@ -200,7 +205,7 @@ k60_touch_pins_power(uint32_t *irq_level)
+ 	k60_touch_flush();
+ 	delay(K60_TOUCH_SETTLE_MS * 1000);
+ 
+-	if (k60_touch_pin_level(K60_TOUCH_GPIO_IRQ, &level) != 0) {
++	if (k60_touch_pin_level(k60_touch_hw.gpio_irq, &level) != 0) {
+ 		return -1;
+ 	}
+ 	/*
+diff --git a/bsd/sys/k60_touch.h b/bsd/sys/k60_touch.h
+index d1ebe2c..ef98310 100644
+--- a/bsd/sys/k60_touch.h
++++ b/bsd/sys/k60_touch.h
+@@ -157,6 +157,31 @@ extern void k60_touch_test_write(uintptr_t address, uint32_t value);
+ } while (0)
+ #endif
+ 
++/* ------------------------------------------------------------------ *
++ * 接线（ADT 的 /k60-touch 节点）
++ *
++ * 0249 让 tools/mkadt.py 在 ADT 里发一个 /k60-touch，0250 的
++ * k60_touch_dt.c 把它读进下面这个结构。每个字段都有编译期缺省，也就是
++ * 0240-0243 里原来写死的那些值；节点缺席时行为与 0248 完全一样。节点在
++ * 的时候，实际用的值会打在 "K60 TOUCH: dt: ..." 这一行里，可以对着
++ * drivers/k60-goodix-touch/k60-goodix-touch.dtsi 逐项核对。
++ * ------------------------------------------------------------------ */
++
++struct k60_touch_wiring {
++	uintptr_t se_base;		/* QUPv3 SE4 */
++	uint32_t se_window;
++	uintptr_t gcc_base;		/* GCC */
++	uint32_t gcc_window;
++	uintptr_t tlmm_base;		/* TLMM，一引脚一页 */
++	uint32_t tlmm_stride;
++	uint32_t gpio_clk, gpio_mosi, gpio_miso, gpio_cs;
++	uint32_t gpio_reset, gpio_irq, gpio_avdd;
++	uint32_t panel_max_x, panel_max_y;
++	uint32_t spi_hz;		/* DT 的上限；驱动起步仍用 K60_TOUCH_SPI_HZ */
++	uint32_t irq;			/* GIC SPI 号，只记录（全程轮询） */
++	int from_dt;			/* 1 = 值来自 /k60-touch 节点 */
++};
++
+ /* ------------------------------------------------------------------ *
+  * 模块接口
+  * ------------------------------------------------------------------ */
+@@ -174,6 +199,10 @@ struct k60_touch_state {
+ /* 日志落盘开关（0243 按 k60touchflush 设置；0240 的引脚模块默认开）。 */
+ extern int k60_touch_flush_on;
+ 
++/* 0250：接线。k60_touch_init() 在起线程之前调用 load 一次。 */
++extern struct k60_touch_wiring k60_touch_hw;
++int k60_touch_wiring_load(void);
++
+ /* 0240 */
+ void k60_touch_sleep_ms(uint32_t ms);
+ void k60_touch_flush(void);
+@@ -194,6 +223,9 @@ int k60_touch_goodix_probe(int verbose);
+ int k60_touch_goodix_poll(void);
+ int k60_touch_goodix_abi(void);
+ 
++/* 0251：ID 读回的机器可 grep 摘要（探测成功之后调一次） */
++void k60_touch_goodix_id_summary(void);
++
+ /* 0243 */
+ void k60_touch_init(void);
+ 

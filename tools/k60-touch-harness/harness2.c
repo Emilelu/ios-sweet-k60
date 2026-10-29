@@ -27,6 +27,7 @@
 #include <kern/sched_prim.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 
 /* ---- 断言 ---- */
 static int failures;
@@ -47,7 +48,7 @@ printf_stderr(const char *fmt, ...)
 }
 
 /* ---- 假 MMIO ---- */
-#define MAXPAGES 32
+#define MAXPAGES 192
 
 struct page {
 	uint64_t pa;
@@ -98,6 +99,9 @@ page_of_host(const void *p, uint64_t *off)
 		}
 	}
 	unmapped_touched++;
+	if (getenv("HARNESS_DBG")) {
+		fprintf(stderr, "unmapped access at %p\n", p);
+	}
 	return NULL;
 }
 
@@ -181,16 +185,16 @@ chip_respond(const uint8_t *tx, uint32_t length, uint8_t *rx)
 		return;
 	}
 	if ((cmd[0] & 0x80) != 0 && length >= 2 + shift) {
-		/* GT9xx 读：bit15 置一，地址 = 低 15 位。 */
-		addr = ((uint32_t)(cmd[0] & 0x7f) << 8) | cmd[1];
+		/* GT9xx 读：0x80 | 高字节；寄存器都在 0x8000..0x8fff。 */
+		addr = ((uint32_t)cmd[0] << 8) | cmd[1];
 		for (i = 0; i + 2 + shift < length; i++) {
 			rx[2 + shift + i] = chip_read8(addr + i);
 		}
 		return;
 	}
 	if (length >= 2 + shift) {
-		/* GT9xx 写：bit15 清掉。 */
-		addr = ((uint32_t)(cmd[0] & 0x7f) << 8) | cmd[1];
+		/* GT9xx 写：高字节的 bit7 被驱动清掉了，补回来。 */
+		addr = ((uint32_t)(cmd[0] | 0x80) << 8) | cmd[1];
 		for (i = 0; i + 2 + shift < length; i++) {
 			chip_write8(addr + i, cmd[2 + i]);
 		}
@@ -290,6 +294,88 @@ PE_parse_boot_argn(const char *name, void *out, int max_len)
 	return 0;
 }
 
+/* ---- 假 ADT：只有 /k60-touch 一个节点 ------------------------------------ */
+struct fake_prop {
+	char name[48];
+	uint8_t value[64];
+	unsigned size;
+};
+static struct fake_prop dtprops[12];
+static int ndtprops;
+static int dt_present;
+
+static void
+dt_set(const char *name, const void *value, unsigned size)
+{
+	struct fake_prop *p;
+
+	if (ndtprops == (int)(sizeof(dtprops) / sizeof(dtprops[0])) ||
+	    size > sizeof(p->value)) {
+		fprintf(stderr, "harness: dt table full\n");
+		exit(2);
+	}
+	p = &dtprops[ndtprops++];
+	snprintf(p->name, sizeof(p->name), "%s", name);
+	memcpy(p->value, value, size);
+	p->size = size;
+}
+
+static void
+dt_u32(const char *name, uint32_t value)
+{
+	dt_set(name, &value, sizeof(value));
+}
+
+static void
+build_touch_node(void)
+{
+	uintptr_t reg[6];
+
+	dt_present = 1;
+	reg[0] = 0x00990000;
+	reg[1] = 0x4000;
+	reg[2] = 0x00100000;
+	reg[3] = 0x70000;
+	reg[4] = 0x0f100000;
+	reg[5] = 0x1000;
+	dt_set("reg", reg, sizeof(reg));
+	dt_u32("goodix,reset-gpio", 20);
+	dt_u32("goodix,irq-gpio", 21);
+	dt_u32("goodix,avdd-gpio", 71);
+	dt_u32("goodix,panel-max-x", 14400);
+	dt_u32("goodix,panel-max-y", 32000);
+	dt_u32("spi-max-frequency", 15000000);
+}
+
+DTStatus
+SecureDTLookupEntry(const DTEntry searchPoint, const char *pathName,
+    DTEntry *foundEntry)
+{
+	(void)searchPoint;
+	if (!dt_present || strcmp(pathName, "/k60-touch") != 0) {
+		return 1;
+	}
+	*foundEntry = (DTEntry)&dt_present;
+	return kSuccess;
+}
+
+DTStatus
+SecureDTGetProperty(DTEntry entry, const char *propertyName,
+    void const **propertyValue, unsigned int *propertySize)
+{
+	int i;
+
+	(void)entry;
+	for (i = 0; i < ndtprops; i++) {
+		if (strcmp(dtprops[i].name, propertyName) == 0) {
+			*propertyValue = dtprops[i].value;
+			*propertySize = dtprops[i].size;
+			return kSuccess;
+		}
+	}
+	return 1;
+}
+
 /* ---- 内核 API 替身 ---- */
 static uint64_t fake_now;
 static int sleeping;
@@ -297,10 +383,14 @@ static jmp_buf thread_exit;
 static int thread_ran, thread_terminated;
 static thread_continue_t thread_cont;
 static void *thread_param;
+static int rsc_maps;	/* ml_io_map 命中 RSC 的次数：k60rpmhoff=1 必须是 0 */
 
 vm_offset_t
 ml_io_map(vm_offset_t pa, vm_size_t size)
 {
+	if (pa == 0x17a00000u || pa == 0x17a20000u) {
+		rsc_maps++;
+	}
 	return (vm_offset_t)(uintptr_t)phys_ptr((uint64_t)pa, (uint64_t)size);
 }
 
@@ -450,8 +540,8 @@ k60_touch_test_read(uintptr_t address)
 			return 0x00000102u;
 		case 0x064:
 			return 0;
-		case 0x0e24:	/* HW_PARAM_0：FIFO 深度 64 字 */
-			return 64u << 16;
+		case 0x0e24:	/* HW_PARAM_0：[21:16] 是 6 位，64 会溢出成 0 */
+			return 32u << 16;
 		case 0x610:	/* M_IRQ_STATUS */
 			return geni.irq;
 		case 0x780:	/* RX FIFO */
@@ -489,6 +579,17 @@ k60_touch_test_write(uintptr_t address, uint32_t value)
 		return;
 	}
 	pa = page->pa;
+	if (pa == 0x100000u && (uint32_t)off == 0x274e4u) {
+		/* RCG: UPDATE 位写完自清；ROOT_EN 清掉 ROOT_OFF。 */
+		if (value & 1u) {
+			value &= ~1u;
+		}
+		if (value & 2u) {
+			value &= ~(1u << 31);
+		}
+		memcpy(page->mem + off, &value, 4);
+		return;
+	}
 	if (pa == SE_BASE) {
 		se_touched++;
 		switch ((uint32_t)off) {
@@ -786,8 +887,9 @@ main(int argc, char **argv)
 		CHECK(rd32(0x0f100000u + 0x1000u * 20, 0x0) == 0x2c0u,
 		    "RESET cfg = 8 mA output (%#x)",
 		    rd32(0x0f100000u + 0x1000u * 20, 0x0));
-		CHECK(rd32(0x0f100000u + 0x1000u * 21, 0x0) == 0x1u,
-		    "IRQ cfg = input, pull down (%#x)",
+		/* 0245：IRQ 是开漏输出，必须上拉；下拉（0x1）会把电平读成假 0。 */
+		CHECK(rd32(0x0f100000u + 0x1000u * 21, 0x0) == 0x3u,
+		    "IRQ cfg = input, pull up (%#x)",
 		    rd32(0x0f100000u + 0x1000u * 21, 0x0));
 		/* RPMh：三条 4 字节写落在 ldoc2 的 +0/+4/+8。 */
 		CHECK(rd32(0x17a20000u, 0xd00u + 0x34u) == 0x40004u,
@@ -921,6 +1023,70 @@ main(int argc, char **argv)
 		CHECK(k60_touch_goodix_probe(1) != 0, "a silent chip fails the probe");
 		CHECK(log_has("abi none"), "and says so");
 		CHECK(k60_touch_goodix_poll() != 0, "polling a silent chip fails");
+	} else if (strcmp(scenario, "dt_node") == 0) {
+		build_touch_node();
+		k60_touch_init();
+		CHECK(k60_touch_hw.from_dt == 1, "wiring came from /k60-touch");
+		CHECK(log_has("K60 TOUCH: dt: se 0x990000+0x4000"),
+		    "logs the SE window read from the node");
+		CHECK(k60_touch_hw.se_base == 0x990000 &&
+		    k60_touch_hw.se_window == 0x4000 &&
+		    k60_touch_hw.gcc_base == 0x100000 &&
+		    k60_touch_hw.gcc_window == 0x70000 &&
+		    k60_touch_hw.tlmm_base == 0xf100000 &&
+		    k60_touch_hw.tlmm_stride == 0x1000,
+		    "all three windows decoded");
+		CHECK(k60_touch_hw.gpio_reset == 20 &&
+		    k60_touch_hw.gpio_irq == 21 &&
+		    k60_touch_hw.gpio_avdd == 71, "gpios decoded");
+		CHECK(k60_touch_hw.panel_max_x == 14400 &&
+		    k60_touch_hw.panel_max_y == 32000, "axes decoded");
+		CHECK(k60_touch_hw.spi_hz == 15000000, "spi ceiling decoded");
+	} else if (strcmp(scenario, "dt_missing") == 0) {
+		k60_touch_init();
+		CHECK(k60_touch_hw.from_dt == 0, "falls back to the compiled wiring");
+		CHECK(log_has("dt: no /k60-touch node"), "says the node is absent");
+		CHECK(k60_touch_hw.se_base == 0x990000 &&
+		    k60_touch_hw.gpio_irq == 21, "compiled defaults unchanged");
+	} else if (strcmp(scenario, "rpmhoff") == 0) {
+		build_cmd_db("ldoc2", 0x40004u, 1);
+		fake_clocks(1);
+		build_berlin_chip();
+		boot_arg("k60touchstage", 4);
+		boot_arg("k60rpmhoff", 1);
+		k60_touch_init();
+		run_thread();
+		CHECK(log_has("iovdd vote skipped (k60rpmhoff=1), RSC not mapped"),
+		    "says the vote is skipped and RSC stays unmapped");
+		CHECK(rsc_maps == 0, "RSC is never mapped (%d maps)", rsc_maps);
+		CHECK(rsc_triggers == 0, "no RSC trigger");
+		CHECK(log_has("clocks ready"), "continues into the clock stage");
+		CHECK(k60_touch_goodix_abi() == 1, "reaches the ID read");
+		CHECK(log_has("K60 TOUCH: ID: abi=berlin"), "prints the ID summary");
+	} else if (strcmp(scenario, "rscprobe_refused") == 0) {
+		boot_arg("k60rpmhoff", 1);
+		boot_arg("k60rscprobe", 1);
+		k60_touch_init();
+		run_thread();
+		CHECK(log_has("rsc probe refused"), "refuses the probe with the bypass on");
+		CHECK(rsc_maps == 0, "and never maps RSC (%d)", rsc_maps);
+	} else if (strcmp(scenario, "id_readback") == 0) {
+		build_touch_node();
+		fake_clocks(1);
+		build_berlin_chip();
+		build_berlin_report(0x80, 1, 7200, 16000);
+		boot_arg("k60touchstage", 1);
+		boot_arg("k60touchid", 1);
+		boot_arg("k60rpmhoff", 1);
+		k60_touch_init();
+		CHECK(log_has("init: stage 4"), "k60touchid raises the stage to 4");
+		run_thread();
+		CHECK(log_has("K60 TOUCH: ID: abi=berlin chip=\"911\""),
+		    "prints the machine-readable ID line");
+		CHECK(log_has("K60 TOUCH: ID: raw 0x10014 = 39 31 31 00"),
+		    "prints the raw ID bytes");
+		CHECK(log_has("k60touchid=1, ID readback only"),
+		    "stops after the readback");
 	} else {
 		fprintf(stderr, "unknown scenario '%s'\n", scenario);
 		return 2;

@@ -1,0 +1,136 @@
+/*
+ * Redmi K60 (mondrian / SM8475 "cape") — Goodix digitizer on QUPv3 SE4.
+ *
+ * This file is the wiring of record for the touch path. It is not compiled by
+ * the kernel build: the SWEET xnu gets its device tree from the Apple Device
+ * Tree that tools/mkadt.py emits, and mkadt.py carries the same node as
+ * /k60-touch (see "Mapping to the ADT" in README.md). check-wiring.py reads
+ * both and fails when a number here and a number in mkadt.py disagree, so this
+ * file cannot drift away from what the kernel actually uses.
+ *
+ * Sources, per value:
+ *   [FDT]  mondrian live device tree, dtbo_a_fdt19.dtb fragment@30
+ *          (xiaomi_touch@0, the m11a panel overlay) and the base tree
+ *          (spi@990000, clock-controller@100000, pinctrl, rpmh regulators)
+ *   [PONG] refs/UniXNU-pong bsd/dev/pong_goodix.c — same QUPv3 SE4, same
+ *          Goodix family, proven on hardware (Nothing Phone 2, also SM8475)
+ *   [XTOM] XTOM0706 board measurements quoted in docs/LOCKSCREEN-2026-10-28.md
+ */
+
+/dts-v1/;
+
+/* QUPv3 wrapper 0 / serial engine 4. The wrapper's own base is not modelled:
+ * the kernel programs the SE and the GCC branch, never the wrapper. */
+#define SE4_BASE		0x00990000
+#define SE4_SIZE		0x00004000
+
+/* TLMM: one page per pin. [XTOM] 0x0f100000 is the measured base; the value in
+ * the base DT (0x0f000000) aborts or wedges the interconnect, so it is wrong. */
+#define TLMM_BASE		0x0f100000
+#define TLMM_STRIDE		0x00001000
+
+/* GCC: CBCR at +0x62008, the SE4 RCG at +0x274e4, both inside 0x70000. */
+#define GCC_BASE		0x00100000
+#define GCC_WINDOW		0x00070000
+
+/* IOVDD is not a GPIO: it is pm8350c LDO C2 (rpmh-regulator-ldoc2), 1.8 V.
+ * [XTOM] the RSC block at 0x17a00000 is unreachable on this unit — the first
+ * access takes the whole machine down with no panic. The driver therefore never
+ * maps it unless k60rpmhoff=0 is passed explicitly, and the LDO is assumed to
+ * be left on by the bootloader. */
+
+/ {
+	/*
+	 * The touch controller. Kept outside /soc: the kernel looks it up by
+	 * path (/k60-touch), the same way it finds /sweet-ufs and /sweet-fbcon.
+	 */
+	k60-touch {
+		compatible = "goodix,gt9916", "goodix,goodix-touchscreen";
+		status = "okay";
+
+		/* <SE base size, GCC base window, TLMM base stride> */
+		reg = <SE4_BASE SE4_SIZE GCC_BASE GCC_WINDOW TLMM_BASE TLMM_STRIDE>;
+
+		/* [FDT] base tree spi@990000: interrupts = <0 0x25d 4> = GIC SPI 605.
+		 * Nothing claims it: the driver polls and leaves M_IRQ_EN at 0. */
+		interrupt-parent = <&intc>;
+		interrupts = <0 605 4>;
+
+		/* [FDT] dtbo goodix,reset-gpio <&tlmm 0x14 0> — active low.
+		 * [FDT] dtbo goodix,irq-gpio   <&tlmm 0x15 0x2008> — open drain, so
+		 * the driver pulls it up before it reads a level.
+		 * [FDT] dtbo goodix,avdd-gpio  <&tlmm 0x47 0> — active high. */
+		goodix,reset-gpio = <&tlmm 20 0>;
+		goodix,irq-gpio = <&tlmm 21 0>;
+		goodix,avdd-gpio = <&tlmm 71 0>;
+
+		/* [FDT] dtbo: 0x3840 x 0x7d00 = 10 x the 1440x3200 panel, in 0.1 mm.
+		 * The IC's own IC-info block wins when it reports something. */
+		goodix,panel-max-x = <14400>;
+		goodix,panel-max-y = <32000>;
+		goodix,panel-max-w = <255>;
+		goodix,panel-max-p = <4096>;
+
+		/* [FDT] dtbo goodix,firmware-name / goodix,config-name. The files
+		 * themselves are Android artifacts; the driver only logs the names
+		 * until a firmware update path exists. */
+		goodix,firmware-name = "goodix_firmware_m11a";
+		goodix,config-name = "goodix_cfg_group_m11a";
+		goodix,iovdd-name = "ldoc2";
+
+		/* [FDT] dtbo spi-max-frequency = 0xe4e1c0 = 15 MHz. The driver
+		 * starts at 4 MHz (k60touchhz) because the SER divider is derived
+		 * from a parent clock it only decodes, never programs. */
+		spi-max-frequency = <15000000>;
+		spi-cs-high;
+
+		/* [FDT] dtbo pinctrl-0/1 = pmx_ts_active / pmx_ts_suspend. */
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&pmx_ts_active>;
+		pinctrl-1 = <&pmx_ts_suspend>;
+
+		goodix@0 {
+			compatible = "goodix,gt9916";
+			reg = <0>;		/* SPI chip select 0 */
+			spi-max-frequency = <15000000>;
+		};
+	};
+};
+
+/*
+ * Pin groups, kept next to the node so the numbers live in one file. Function 1
+ * is the QUP function on TLMM; the kernel writes CFG bit[5:2] = 1 and drive
+ * 8 mA for the four SPI lines, GPIO function for the three control lines.
+ */
+&tlmm {
+	pmx_ts_active: pmx-ts-active {
+		pins = "gpio20", "gpio21";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-up;
+	};
+
+	pmx_ts_suspend: pmx-ts-suspend {
+		pins = "gpio20", "gpio21";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	pmx_ts_spi: pmx-ts-spi {
+		pins = "gpio16", "gpio17", "gpio18", "gpio19";
+		function = "qup4";
+		drive-strength = <8>;
+		bias-disable;
+	};
+};
+
+/*
+ * Clocks. [FDT] base tree spi@990000: clocks = <&gcc 94 134 135> — the SE
+ * clock, m-ahb and s-ahb. Patch 0241 turns those into the five branch votes at
+ * GCC + 0x62008 (bits 6, 7, 8, 9, 14) and reads the RCG at +0x274e4 to learn
+ * the SER parent.
+ */
+&gcc {
+	status = "okay";
+};
