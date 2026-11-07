@@ -1,4 +1,4 @@
-﻿name: xnu
+name: xnu
 
 on:
   workflow_dispatch:
@@ -26,8 +26,8 @@ on:
 
 concurrency:
   group: xnu-${{ github.ref }}
-  # 涓嶅彇娑堟鍦ㄨ窇鐨勯偅鏉★細涓€娆℃瀯寤轰竷鍒嗛挓锛岃瀹冭窇瀹屽啀鎺掍笅涓€鏉°€傚師鏉?cancel 鎺?
-  # 涔嬪悗锛岄偅鏉＄殑浜х墿灏辨病浜嗭紝瀵?0235 閭ｇ"鍒氭帹瀹屽張琛ヤ竴鍒€"鐨勬儏鍐靛挨鍏跺潙銆?
+  # 不取消正在跑的那条：一次构建七分钟，让它跑完再排下一条。原来 cancel 掉
+  # 之后，那条的产物就没了，对 0235 那种"刚推完又补一刀"的情况尤其坑。
   cancel-in-progress: false
 
 env:
@@ -39,8 +39,9 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
+    # macos-14 的 runner 已被 GitHub 下线（作业秒取消）；macos-15 只有 Xcode 16.x。
+    # Xcode 16 的 iig 会给 IORPC 加 kernelContent 字段，xnu-8796 里没有，
+    # 所以下面有一个步骤把生成的 IORPC 头改回旧布局。
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -86,7 +87,19 @@ jobs:
 
       - name: Deps
         run: |
-          brew install jq gum bash cmake ninja
+          brew install jq gum bash cmake ninja python@3.11
+          # xnu's lldbmacros are py_compile'd with python3; 3.12+ rejects their tabs
+          mkdir -p "$HOME/py311" && ln -sf /opt/homebrew/opt/python@3.11/bin/python3.11 "$HOME/py311/python3"
+          echo "$HOME/py311" >> "$GITHUB_PATH"
+          # make runs in this step too: point the system python3 at 3.11 now
+          sudo ln -sf /opt/homebrew/opt/python@3.11/bin/python3.11 /usr/local/bin/python3
+          sudo ln -sf /opt/homebrew/opt/python@3.11/bin/python3.11 /usr/bin/python3 2>/dev/null || true
+          # dxb/build.sh 会自己往 PATH 前面塞 /opt/homebrew/bin，那个 python3 是
+          # 3.14，lldbmacros 的 syntax_checker 就报 "tab character"。直接换掉。
+          sudo mv /opt/homebrew/bin/python3 /opt/homebrew/bin/python3.orig 2>/dev/null || true
+          sudo ln -sf /opt/homebrew/opt/python@3.11/bin/python3.11 /opt/homebrew/bin/python3
+          /opt/homebrew/bin/python3 --version
+          python3 --version
           # build.sh only checks that xcodes exists (Xcode is preinstalled); no bottle on macOS 14
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
@@ -98,12 +111,43 @@ jobs:
           xcodebuild -version
           xcrun --find iig
 
+      - name: Pin lldbmacros to python 3.11
+        run: |
+          # lldbmacros 的规则是直接执行 core/syntax_checker.py，走的是它自己的
+          # shebang，所以 $GITHUB_PATH 里那个 py311 目录压不住 /opt/homebrew/bin
+          # 上的 python3（runner 上已经是 3.14），kcdata.py 就报 "tab character"。
+          # 直接把 shebang 改成 3.11 的绝对路径，绕开 PATH 顺序。
+          # 缓存未命中时 dxb/xnu 还不存在（build.sh 自己 clone），这一步就空跑。
+          P=/opt/homebrew/opt/python@3.11/bin/python3.11
+          n=0
+          for f in $(grep -rl '^#!/usr/bin/env python3' dxb/xnu/tools/lldbmacros 2>/dev/null || true); do
+            sed -i '' "1s|.*|#!$P|" "$f"
+            n=$((n+1))
+          done
+          echo "repinned $n lldbmacros scripts"
+          head -1 dxb/xnu/tools/lldbmacros/core/syntax_checker.py 2>/dev/null || echo "no tree yet"
+          "$P" --version
+
       - name: Build
         working-directory: dxb
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee build.log
+
+      - name: Fail on skipped patches
+        if: always()
+        run: |
+          # build.sh 对 git apply 失败的补丁只打印 warning 就跳过，构建照样"成功"，
+          # 于是内核缺一整段功能还看不出来。这里把它变成硬失败。
+          if grep -q 'Skipping patch' dxb/build.log 2>/dev/null; then
+            echo "::error::some patches were skipped"
+            grep -A1 'Skipping patch' dxb/build.log || true
+            exit 1
+          fi
+          echo "all patches applied"
 
       - name: Package build tree for local compiles
         if: always()
@@ -172,4 +216,3 @@ jobs:
           name: xnu-kernel
           path: out/
           if-no-files-found: warn
-

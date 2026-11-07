@@ -56,7 +56,7 @@ diff --git a/bsd/dev/k60_touch_geni.c b/bsd/dev/k60_touch_geni.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/k60_touch_geni.c
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,684 @@
 +/*
 + * K60（mondrian，SM8475）触摸：GCC 时钟与 QUPv3 SE4 上的 GENI SPI。
 + *
@@ -105,10 +105,13 @@ new file mode 100644
 +#define K60_GCC_VOTE_CORE	(1u << 8)
 +#define K60_GCC_VOTE_CORE_2X	(1u << 9)
 +#define K60_GCC_VOTE_SE4	(1u << 14)
++/* The five branches gcc-sm8450.c enables for QUPV3 wrap 0 (SE4 @ 0x990000). */
 +#define K60_GCC_VOTE_MASK	(K60_GCC_VOTE_M_AHB | K60_GCC_VOTE_S_AHB | \
 +				 K60_GCC_VOTE_CORE | K60_GCC_VOTE_CORE_2X | \
 +				 K60_GCC_VOTE_SE4)
 +
++#define K60_GCC_CORE_2X_HALT	0x3300cu
++#define K60_GCC_CORE_HALT	0x33000u
 +#define K60_GCC_M_AHB_HALT	0x27004u
 +#define K60_GCC_S_AHB_HALT	0x27008u
 +#define K60_GCC_SE4_HALT	0x274dcu
@@ -123,6 +126,7 @@ new file mode 100644
 +#define K60_RCG_DIV_MASK	0x1fu
 +#define K60_RCG_MODE_MASK	(3u << 12)
 +#define K60_CLOCK_OFF		(1u << 31)
++#define K60_HWCG_BIT		(1u << 1)	/* CBCR 的 hwcg 位：开着时 halt 不可信 */
 +
 +#define K60_XO_HZ		19200000u
 +#define K60_GPLL0_MAIN_HZ	600000000u
@@ -135,7 +139,11 @@ new file mode 100644
 +#define K60_SE_CGC_CTRL		0x028u
 +#define K60_SE_STATUS		0x040u	/* bit0：有命令在跑 */
 +#define K60_SE_SER_M_CLK_CFG	0x048u	/* bit0 使能、[15:4] 分频 */
-+#define K60_SE_IF_DISABLE_RO	0x064u
++#define K60_SE_IF_DISABLE_RO	0x064u	/* bit0=1 表示 FIFO 接口是关的（只读） */
++#define K60_SE_CLK_CTRL_RO	0x060u	/* 只读的时钟状态 */
++#define K60_SE_GENI_CLK_CTRL	0x2000u	/* bit0 SER_CLK_SEL：串行时钟选择 */
++#define K60_SE_DMA_IF_EN	0x2004u	/* bit0：DMA 接口使能 */
++#define K60_SE_FIFO_IF_DISABLE	0x2008u	/* bit0：FIFO 接口禁用，要清掉 */
 +#define K60_SE_FW_REVISION_RO	0x068u	/* [15:8] 协议：1 = SPI */
 +#define K60_SE_CLK_SEL		0x07cu
 +#define K60_SE_SPI_CPHA		0x224u
@@ -190,6 +198,10 @@ new file mode 100644
 +static vm_offset_t k60_gcc, k60_se;
 +static uint32_t k60_fifo_depth;
 +static uint32_t k60_se_source_hz;
++
++/* 手工 SPI 的开关与实现（定义在文件后半，bringup 之前用到）。 */
++static int k60_bb_mode;
++static void k60_bb_xfer(const uint8_t *tx, uint8_t *rx, uint32_t length);
 +static int k60_len_words;	/* k60touchlenw=1：TRANS_LEN 写字数而不是字节 */
 +static unsigned k60_xfer_complaints;
 +
@@ -213,7 +225,7 @@ new file mode 100644
 +int
 +k60_touch_clocks_on(void)
 +{
-+	uint32_t before, after, cmd, cfg, halt_m, halt_s, halt_se;
++	uint32_t before, after, cmd, cfg, dfs, halt_m, halt_s, halt_se, halt_c, halt_c2, halt_bad;
 +	unsigned i, missed = 0;
 +
 +	printf("K60 TOUCH: stage 3: gcc %#lx window %#lx, no SE access yet\n",
@@ -249,36 +261,76 @@ new file mode 100644
 +		return -1;
 +	}
 +
-+	/* 分支 CBCR/HALT：bit31 清掉才是真的开着。 */
-+	for (i = 0; i < 1000; i++) {
-+		halt_m = K60_TOUCH_RD(k60_gcc + K60_GCC_M_AHB_HALT);
-+		halt_s = K60_TOUCH_RD(k60_gcc + K60_GCC_S_AHB_HALT);
-+		halt_se = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_HALT);
-+		if (!((halt_m | halt_s | halt_se) & K60_CLOCK_OFF)) {
-+			break;
++	/*
++	 * 0x62008 的投票只是"允许时钟开"，真正把分支打开的是 CBCR 的 bit0
++	 * （Linux 的 clk_branch_toggle 写的就是这一位）。不写它，分支一直是
++	 * halt 的，bit31 读回来还立着。
++	 */
++	{
++		static const uint32_t br[5] = {
++			K60_GCC_M_AHB_HALT, K60_GCC_S_AHB_HALT,
++			K60_GCC_SE4_HALT, K60_GCC_CORE_HALT,
++			K60_GCC_CORE_2X_HALT
++		};
++
++		for (i = 0; i < 5; i++) {
++			K60_TOUCH_WR(k60_gcc + br[i],
++			    K60_TOUCH_RD(k60_gcc + br[i]) | 1u);
 +		}
-+		delay(10);
 +	}
-+	halt_m = K60_TOUCH_RD(k60_gcc + K60_GCC_M_AHB_HALT);
-+	halt_s = K60_TOUCH_RD(k60_gcc + K60_GCC_S_AHB_HALT);
-+	halt_se = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_HALT);
-+	printf("K60 TOUCH: gcc halt m/s/se %#x/%#x/%#x\n", halt_m, halt_s,
-+	    halt_se);
++	printf("K60 TOUCH: gcc branch bit0 written (m/s/se/c/c2)\n");
++	k60_touch_flush();
++	/*
++	 * 只读快照：这几组窗口回读出来的东西要能看出寄存器是活的还是死的。
++	 * 0x62000 组当对照 —— 那个窗口的读写在投票位上是有效的。
++	 */
++	printf("K60 TOUCH: gcc dump 27000:");
++	for (i = 0; i < 6; i++) {
++		printf(" %#x", K60_TOUCH_RD(k60_gcc + 0x27000u + i * 4u));
++	}
++	printf(" 274d0:");
++	for (i = 0; i < 15; i++) {
++		printf(" %#x", K60_TOUCH_RD(k60_gcc + 0x274d0u + i * 4u));
++	}
++	printf("\n");
++	k60_touch_flush();
++	printf("K60 TOUCH: gcc dump 33000:");
++	for (i = 0; i < 6; i++) {
++		printf(" %#x", K60_TOUCH_RD(k60_gcc + 0x33000u + i * 4u));
++	}
++	printf(" 62000:");
++	for (i = 0; i < 6; i++) {
++		printf(" %#x", K60_TOUCH_RD(k60_gcc + 0x62000u + i * 4u));
++	}
++	printf("\n");
++	k60_touch_flush();
++	/* bit0 写下去能不能读回来：读 0x27004 与写后回读对照。 */
++	K60_TOUCH_WR(k60_gcc + K60_GCC_M_AHB_HALT,
++	    K60_TOUCH_RD(k60_gcc + K60_GCC_M_AHB_HALT) | 1u);
++	printf("K60 TOUCH: m_ahb after write bit0 %#x\n",
++	    K60_TOUCH_RD(k60_gcc + K60_GCC_M_AHB_HALT));
 +	k60_touch_flush();
 +
 +	/*
-+	 * SE4 的根时钟。已经开着就只解码父源（供 SER 分频用），不重配：
-+	 * 引导装载程序可能给了 100 MHz，改错反而把 SE 的时钟弄没。
++	 * SE4 的根时钟。ROOT_EN 没立就等于根没开，分支再怎么投票也是 halt。
++	 * cfg 只在 dfs 关着的时候才动：DFS 表不在我们手里，改错直接把根弄死。
 +	 */
 +	cmd = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_CMD);
 +	cfg = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_CFG);
-+	printf("K60 TOUCH: gcc se4 root cmd %#x cfg %#x\n", cmd, cfg);
++	dfs = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_CMD + 0x14u);
++	printf("K60 TOUCH: gcc se4 root cmd %#x cfg %#x dfs %#x\n", cmd, cfg,
++	    dfs);
 +	k60_touch_flush();
-+	if (cmd & K60_RCG_ROOT_OFF) {
-+		/* 选 XO、不分频（CFG 的 [10:8]=0、[4:0]=0），再 UPDATE、ROOT_EN。 */
-+		K60_TOUCH_WR(k60_gcc + K60_GCC_SE4_CFG,
-+		    cfg & ~(K60_RCG_SRC_MASK | K60_RCG_DIV_MASK |
-+		    K60_RCG_MODE_MASK));
++	if ((cmd & K60_RCG_ROOT_EN) == 0) {
++		if (dfs & 1u) {
++			printf("K60 TOUCH: se4 dfs on, leaving cfg %#x\n", cfg);
++			k60_touch_flush();
++		} else {
++			/* 选 XO、不分频（CFG 的 [10:8]=0、[4:0]=0）。 */
++			K60_TOUCH_WR(k60_gcc + K60_GCC_SE4_CFG,
++			    cfg & ~(K60_RCG_SRC_MASK | K60_RCG_DIV_MASK |
++			    K60_RCG_MODE_MASK));
++		}
 +		K60_TOUCH_WR(k60_gcc + K60_GCC_SE4_CMD, K60_RCG_UPDATE);
 +		for (i = 0; i < 1000; i++) {
 +			if (!(K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_CMD) &
@@ -295,7 +347,7 @@ new file mode 100644
 +		}
 +		K60_TOUCH_WR(k60_gcc + K60_GCC_SE4_CMD, K60_RCG_ROOT_EN);
 +		delay(1000);
-+		printf("K60 TOUCH: gcc se4 root was off, now cmd %#x cfg %#x\n",
++		printf("K60 TOUCH: gcc se4 root enabled, now cmd %#x cfg %#x\n",
 +		    K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_CMD),
 +		    K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_CFG));
 +		k60_touch_flush();
@@ -303,14 +355,53 @@ new file mode 100644
 +	}
 +	k60_se_source_hz = k60_se_source(cfg);
 +
++	/* 分支 CBCR/HALT：bit31 清掉才是真的开着。 */
++	for (i = 0; i < 1000; i++) {
++		halt_m = K60_TOUCH_RD(k60_gcc + K60_GCC_M_AHB_HALT);
++		halt_s = K60_TOUCH_RD(k60_gcc + K60_GCC_S_AHB_HALT);
++		halt_se = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_HALT);
++		halt_c = K60_TOUCH_RD(k60_gcc + K60_GCC_CORE_HALT);
++		halt_c2 = K60_TOUCH_RD(k60_gcc + K60_GCC_CORE_2X_HALT);
++		if (!((halt_m | halt_s | halt_se | halt_c | halt_c2) &
++		    K60_CLOCK_OFF)) {
++			break;
++		}
++		delay(10);
++	}
++	halt_m = K60_TOUCH_RD(k60_gcc + K60_GCC_M_AHB_HALT);
++	halt_s = K60_TOUCH_RD(k60_gcc + K60_GCC_S_AHB_HALT);
++	halt_se = K60_TOUCH_RD(k60_gcc + K60_GCC_SE4_HALT);
++	halt_c = K60_TOUCH_RD(k60_gcc + K60_GCC_CORE_HALT);
++	halt_c2 = K60_TOUCH_RD(k60_gcc + K60_GCC_CORE_2X_HALT);
++	printf("K60 TOUCH: gcc halt m/s/se/c/c2 %#x/%#x/%#x/%#x/%#x\n",
++	    halt_m, halt_s, halt_se, halt_c, halt_c2);
++	k60_touch_flush();
++
 +	/*
 +	 * 判据：三条分支的 halt 位都清了才算时钟真的在跑。只要有一条还立着，
 +	 * 就停在 GENI 之前 —— 带着没起来的时钟去读 SE 是这一步唯一会把整机
 +	 * 挂住的操作。
 +	 */
-+	if ((halt_m | halt_s | halt_se) & K60_CLOCK_OFF) {
-+		printf("K60 TOUCH: clocks not ready (m/s/se %#x/%#x/%#x), "
-+		    "stopping before SE\n", halt_m, halt_s, halt_se);
++	/*
++	 * HWCG（硬件自动门控）开着时，空闲的时钟本来就读成 CLK_OFF，这不代表
++	 * 没开 —— Linux 的 clk_branch_in_hwcg_mode() 同样让 halt 检查直接放过。
++	 * 上机日志里 s_ahb 读 0x80000002，bit1 正是 hwcg 位。
++	 */
++	halt_bad = 0;
++	if (!(halt_m & K60_HWCG_BIT) && (halt_m & K60_CLOCK_OFF)) {
++		halt_bad |= 1;
++	}
++	if (!(halt_s & K60_HWCG_BIT) && (halt_s & K60_CLOCK_OFF)) {
++		halt_bad |= 2;
++	}
++	if (!(halt_se & K60_HWCG_BIT) && (halt_se & K60_CLOCK_OFF)) {
++		halt_bad |= 4;
++	}
++	if (halt_bad != 0) {
++		printf("K60 TOUCH: clocks not ready (m/s/se %#x/%#x/%#x, hwcg "
++		    "%u/%u/%u, bad %u), stopping before SE\n", halt_m, halt_s,
++		    halt_se, !!(halt_m & K60_HWCG_BIT), !!(halt_s & K60_HWCG_BIT),
++		    !!(halt_se & K60_HWCG_BIT), halt_bad);
 +		k60_touch_flush();
 +		return -1;
 +	}
@@ -387,6 +478,10 @@ new file mode 100644
 +int
 +k60_touch_geni_xfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
 +{
++	if (k60_bb_mode != 0) {
++		k60_bb_xfer(tx, rx, length);
++		return 0;
++	}
 +	uint32_t sent = 0, received = 0, status = 0;
 +	uint32_t txlen;
 +	uint64_t deadline;
@@ -449,6 +544,48 @@ new file mode 100644
 + * 把 SE4 配成 SPI。只写 GENI 的配置寄存器，不碰固件（固件是引导装载程序
 + * 装进去的）。返回 0 或一个可以打进日志的原因字符串。
 + */
++/* ---- 手工 SPI（k60touchbb=1） ---------------------------------------------------------
++ * 这颗 SE 的 FIFO 接口是关着的，而打开它的 SE_FIFO_IF_DISABLE 在 0x2008 那页
++ * 寄存器上 —— 那页一读就挂总线（0x1000 那次已经挂过一回）。GENI 这条先放一边，
++ * 直接用 GPIO16-19 把时钟和数据打出来，先把 Goodix 的 ID 读到手。
++ */
++
++static void
++k60_bb_edge(uint32_t pin, int level)
++{
++	(void)k60_touch_pin_output(pin, level, K60_TOUCH_PIN_PULL_NONE,
++	    K60_TOUCH_PIN_DRIVE_8MA);
++	delay(1);
++}
++
++static void
++k60_bb_xfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
++{
++	uint32_t i;
++	int bit;
++
++	k60_bb_edge(K60_TOUCH_GPIO_CS, 1);
++	k60_bb_edge(K60_TOUCH_GPIO_CS, 0);
++	for (i = 0; i < length; i++) {
++		uint8_t out = tx != NULL ? tx[i] : 0;
++		uint8_t in = 0;
++
++		for (bit = 7; bit >= 0; bit--) {
++			uint32_t level = 0;
++
++			k60_bb_edge(K60_TOUCH_GPIO_MOSI, (out >> bit) & 1);
++			k60_bb_edge(K60_TOUCH_GPIO_CLK, 1);
++			(void)k60_touch_pin_level(K60_TOUCH_GPIO_MISO, &level);
++			in = (uint8_t)((in << 1) | (level & 1u));
++			k60_bb_edge(K60_TOUCH_GPIO_CLK, 0);
++		}
++		if (rx != NULL) {
++			rx[i] = in;
++		}
++	}
++	k60_bb_edge(K60_TOUCH_GPIO_CS, 1);
++}
++
 +int
 +k60_touch_geni_bringup(uint32_t hz, const char **problem)
 +{
@@ -457,7 +594,32 @@ new file mode 100644
 +		K60_TOUCH_GPIO_MISO, K60_TOUCH_GPIO_CS,
 +	};
 +	uint32_t fw, depth, divider, mclk;
++	uint32_t level = 1;
 +	unsigned i;
++
++	k60_bb_mode = 0;
++	(void)PE_parse_boot_argn("k60touchbb", &k60_bb_mode, sizeof(k60_bb_mode));
++	if (k60_bb_mode != 0) {
++		/* CS 空闲高、CLK 低、MOSI 低，MISO 留成输入。 */
++		if (k60_touch_pin_output(K60_TOUCH_GPIO_CS, 1,
++		    K60_TOUCH_PIN_PULL_UP, K60_TOUCH_PIN_DRIVE_8MA) != 0 ||
++		    k60_touch_pin_output(K60_TOUCH_GPIO_CLK, 0,
++		    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA) != 0 ||
++		    k60_touch_pin_output(K60_TOUCH_GPIO_MOSI, 0,
++		    K60_TOUCH_PIN_PULL_NONE, K60_TOUCH_PIN_DRIVE_8MA) != 0 ||
++		    k60_touch_pin_config(K60_TOUCH_GPIO_MISO,
++		    K60_TOUCH_PIN_FUNC_GPIO, K60_TOUCH_PIN_PULL_NONE,
++		    K60_TOUCH_PIN_DRIVE_8MA, 0) != 0) {
++			*problem = "bit-bang pins do not take gpio";
++			return -1;
++		}
++		(void)k60_touch_pin_level(K60_TOUCH_GPIO_CS, &level);
++		printf("K60 TOUCH: stage 4b: bit-banged SPI on gpio16-19, cs %u\n",
++		    level);
++		k60_touch_flush();
++		*problem = NULL;
++		return 0;
++	}
 +
 +	*problem = "unknown";
 +	printf("K60 TOUCH: stage 4: se4 %#lx, spi up to %u Hz\n",
@@ -482,10 +644,6 @@ new file mode 100644
 +		*problem = "se4 has no SPI firmware";
 +		return -1;
 +	}
-+	if (K60_TOUCH_RD(k60_se + K60_SE_IF_DISABLE_RO) & 1u) {
-+		*problem = "se4 FIFO interface is disabled";
-+		return -1;
-+	}
 +	depth = (K60_TOUCH_RD(k60_se + K60_SE_HW_PARAM_0) >> 16) & 0x3fu;
 +	if (depth < 4) {
 +		*problem = "se4 reports no FIFO";
@@ -506,15 +664,28 @@ new file mode 100644
 +	K60_TOUCH_WR(k60_se + K60_SE_FORCE_DEFAULT, 1);
 +	K60_TOUCH_WR(k60_se + K60_SE_DMA_MODE_EN,
 +	    K60_TOUCH_RD(k60_se + K60_SE_DMA_MODE_EN) & ~1u);
++	/*
++	 * 0x64 只读，bit0=1 表示这颗 SE 的 FIFO 接口是关的。真正的开关在 0x2008，
++	 * 但那页寄存器（0x1000 以上）一读就挂总线，实测直接把整机带走 —— 所以
++	 * 只读 0x64，然后走 k60touchbb=1 的手工 SPI。
++	 */
++	printf("K60 TOUCH: geni fifo_if_disable_ro %#x (the 0x2000 page is unsafe)\n",
++	    K60_TOUCH_RD(k60_se + K60_SE_IF_DISABLE_RO));
++	k60_touch_flush();
 +	K60_TOUCH_WR(k60_se + K60_SE_RX_WATERMARK, depth - 3);
 +	K60_TOUCH_WR(k60_se + K60_SE_RX_RFR_WATERMARK, depth - 2);
 +	K60_TOUCH_WR(k60_se + K60_SE_TX_WATERMARK, 0);
 +	/*
-+	 * 中断全程屏蔽：这里只轮询，GIC SPI 605 没有人认领，使能了就是一条
-+	 * 永远没人处理的中断。状态位不受它影响。
++	/*
++	 * 状态位要跟着使能位才会置起来：这两组清零的话，M_IRQ_STATUS 永远是 0，
++	 * 传输就会一直轮询到超时（上机日志里 status 0、sent 36、received 0 就是
++	 * 这个）。pong 那边写的是 SE_IRQ_EN |= 0xf、M_IRQ_EN |= 0x7fc0007f；
++	 * GIC 的 SPI 605 我们不使能，所以不会有中断真的打到 CPU。
 +	 */
-+	K60_TOUCH_WR(k60_se + K60_SE_IRQ_EN, 0);
-+	K60_TOUCH_WR(k60_se + K60_SE_M_IRQ_EN, 0);
++	K60_TOUCH_WR(k60_se + K60_SE_IRQ_EN,
++	    K60_TOUCH_RD(k60_se + K60_SE_IRQ_EN) | 0xfu);
++	K60_TOUCH_WR(k60_se + K60_SE_M_IRQ_EN,
++	    K60_TOUCH_RD(k60_se + K60_SE_M_IRQ_EN) | 0x7fc0007fu);
 +
 +	/* 模式 0、CS0、8 位、MSB 先、四个字节一个 FIFO 字。 */
 +	K60_TOUCH_WR(k60_se + K60_SE_SPI_LOOPBACK, 0);
@@ -560,11 +731,17 @@ new file mode 100644
 +	printf("K60 TOUCH: se4 status %#x fifo %u words\n",
 +	    K60_TOUCH_RD(k60_se + K60_SE_STATUS), k60_fifo_depth);
 +	k60_touch_flush();
++	/* 0x2000 那页碰不得（读了挂总线），这里只报一句；FIFO 路径留给以后的 DMA 版本。 */
++	printf("K60 TOUCH: geni setup done, mclk %#x fifo_if_disable_ro %#x\n",
++	    K60_TOUCH_RD(k60_se + K60_SE_SER_M_CLK_CFG),
++	    K60_TOUCH_RD(k60_se + K60_SE_IF_DISABLE_RO));
++	k60_touch_flush();
 +	*problem = NULL;
 +	return 0;
 +}
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
+
 diff --git a/bsd/conf/files b/bsd/conf/files
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
