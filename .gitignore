@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # device dumps: persist/modemst/fsg hold IMEI + calibration; live DT holds the serial
 backup/
 dtb/
@@ -12,3 +13,16 @@ tools/*/build/
 __pycache__/
 *.pyc
 build/
+=======
+# device dumps: persist/modemst/fsg hold IMEI + calibration; live DT holds the serial
+backup/
+dtb/
+recovery/
+# third-party/Apple sources fetched for reading
+research/
+shim/out/
+xnu/out/
+xnu/out-*/
+__pycache__/
+tools/*/build/
+>>>>>>> Stashed changes
